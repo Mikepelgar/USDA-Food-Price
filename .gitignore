@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+secrets/*
+!secrets/.gitkeep
+*service-account*.json
+*.pem
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

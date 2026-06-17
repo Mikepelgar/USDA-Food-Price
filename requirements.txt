@@ -1,0 +1,6 @@
+# Ingestion-phase dependencies only. More will be added in later phases
+# (warehouse client, transformation, dashboard, forecasting).
+
+requests        # HTTP client for calling the USDA APIs
+python-dotenv   # loads environment variables from a .env file
+pytest          # testing framework

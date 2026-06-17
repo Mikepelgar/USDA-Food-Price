@@ -1,0 +1,2 @@
+# Non-secret configuration lives here in later phases
+# (e.g. API endpoint lists, table schemas, pipeline settings).
