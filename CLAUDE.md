@@ -58,7 +58,11 @@ explicitly started — keep each session focused on its single phase.
   - Real secrets live in `.env` (gitignored). `.env.example` is the committed template.
   - The Google Cloud service-account JSON lives in `secrets/` (gitignored except
     `.gitkeep`). Never commit credentials.
-  - Required env vars: `FDC_API_KEY`, `ERS_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`.
+  - Env vars in `.env` (all set as of 2026-06-20): `FDC_API_KEY` (nutrition API),
+    `BLS_API_KEY` (BLS price API; optional but set — raises the rate limit),
+    `GOOGLE_APPLICATION_CREDENTIALS` (BigQuery, used Phase 2+), and `ERS_API_KEY`
+    (validated but unused so far — kept for possible future ERS API use).
+  - `.env.example` still needs a `BLS_API_KEY` line added (do this in Phase 1).
 - **Project layout (src layout):**
   - `src/usda_food_price_pipeline/` — the importable Python package.
   - `src/usda_food_price_pipeline/ingestion/` — ingestion scripts.
@@ -110,6 +114,10 @@ Price data comes from TWO sources (decided 2026-06-20 — the ERS F-MAP dataset 
   2026-06-20): `FDC_API_KEY` (FoodData Central, 200 OK), `ERS_API_KEY` (ERS ARMS API,
   200 OK), and the GCP service-account JSON at `secrets/gcp-service-account.json`
   (BigQuery token minted + dry-run query 200 OK; project `usda-food-prices`).
+- **Phase-1 inputs ready (2026-06-20):** `BLS_API_KEY` is set in `.env` (BLS Average Price
+  API, verified present). The ERS F-MAP price file was downloaded manually as `FMAP.xlsx`
+  (~12.5 MB, in the user's Downloads) — use it as a fallback if a scriptable F-MAP download
+  URL proves awkward; it should end up in `data/raw/prices/fmap/`.
 - No ingestion, transformation, or dashboard code has been written yet.
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the credential check
