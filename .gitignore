@@ -5,6 +5,9 @@ secrets/*
 *service-account*.json
 *.pem
 
+# Raw ingested data — never commit (pulled locally per phase)
+data/
+
 # Python virtual environment
 .venv/
 venv/
