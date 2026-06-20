@@ -23,23 +23,33 @@ api.data.gov ─────┘                                      (SQL)
 - **Language:** Python 3.11 (venv at `.venv/`).
 - **Ingestion:** `requests` for HTTP; `python-dotenv` for config; `pytest` for tests.
   Only these three dependencies exist today — add more per phase, not preemptively.
-- **Warehouse:** Google Cloud **BigQuery** (assumed; authenticated via a service-account
-  JSON referenced by `GOOGLE_APPLICATION_CREDENTIALS`). Revisit if the user prefers
-  another warehouse.
-- **Transformation:** SQL over warehouse tables (raw → cleaned/modeled). Tooling (e.g. dbt)
-  to be decided in Phase 2.
-- **Serving:** a dashboard (tool TBD) plus a price-forecasting model (library TBD).
+- **Warehouse:** Google Cloud **BigQuery** (permanent free tier; authenticated via the
+  service-account JSON referenced by `GOOGLE_APPLICATION_CREDENTIALS`).
+- **Transformation:** **dbt** on BigQuery.
+- **Orchestration:** **Apache Airflow**, run locally via **Docker** (Docker Compose).
+- **CI:** **GitHub Actions**.
+- **Serving:** **Streamlit** dashboard + a price forecast using **scikit-learn** (or a
+  simple statistical time-series model).
 
 ## Phase plan
 
-1. **Phase 1 — Ingestion (next):** Python scripts that call the two USDA APIs and land raw
-   responses in the warehouse. Add warehouse-client deps when this phase starts.
-2. **Phase 2 — Transformation:** SQL models turning raw data into clean, analytics-ready
-   tables.
-3. **Phase 3 — Serving:** dashboard for trends + a food-price forecast model.
+0. **Phase 0 — Scaffold (DONE):** repo structure, venv, env templates, git + GitHub.
+1. **Phase 1 — Ingestion → LOCAL FILES ONLY:** Python scripts pull from both USDA APIs and
+   save raw, timestamped JSON to `data/raw/nutrition/` and `data/raw/prices/`. **No cloud,
+   warehouse, orchestration, or dashboard code in this phase.**
+2. **Phase 2 — Load to BigQuery:** a loader reads the raw JSON files and loads them as-is
+   into raw/staging tables in BigQuery (idempotent re-runs). No transformation yet.
+3. **Phase 3 — Transformation (dbt on BigQuery):** staging + analytics models, including the
+   nutrition-per-dollar join; dbt tests and docs.
+4. **Phase 4 — Orchestration (Airflow + Docker):** one DAG runs ingest → load → `dbt build`
+   → `dbt test` on a daily schedule, with retries; containerized via Docker Compose.
+5. **Phase 5 — Dashboard + forecast (Streamlit + scikit-learn):** dashboard over the
+   analytics tables; next-month price forecast written back to BigQuery.
+6. **Phase 6 — Polish, CI, portfolio:** GitHub Actions CI, portfolio-quality README, repo
+   cleanup.
 
-Build phases one at a time. Do not write ingestion, transformation, or dashboard code until
-the corresponding phase is explicitly started.
+Build phases one at a time. Do not write code for a later phase until that phase is
+explicitly started — keep each session focused on its single phase.
 
 ## Conventions
 
@@ -67,13 +77,13 @@ These exact calls returned HTTP 200 with the project's real keys on 2026-06-20.
   - Verified: `GET /foods/search?query=<term>&pageSize=<n>&api_key=$FDC_API_KEY`
   - Other documented endpoints: `/food/{fdcId}`, `/foods`, `/foods/list`.
   - Docs: https://fdc.nal.usda.gov/api-guide.html
-- **USDA ERS ARMS Data API** — base `https://api.ers.usda.gov/data/arms`
-  - Verified: `GET /year?api_key=$ERS_API_KEY`
-  - Other documented endpoints: `/state`, `/report`, `/subject`, `/series`, `/surveydata`.
+- **USDA ERS (price data)** — intended dataset is **Food-at-Home Monthly Area Prices**,
+  accessed via the api.data.gov service using `$ERS_API_KEY` (an api.data.gov key).
+  - Key validated in Phase 0 against the ERS ARMS API base
+    `https://api.ers.usda.gov/data/arms` (`GET /year` → 200), which only confirms the key
+    works. In Phase 1, confirm the exact endpoint/dataset for **Food-at-Home Monthly Area
+    Prices** (monthly food prices by category and region) — that, not ARMS, is the target.
   - Docs: https://www.ers.usda.gov/developer/data-apis/
-  - NOTE: ARMS is farm-financial data. If the project needs *retail food prices*
-    specifically, confirm which ERS dataset/endpoint serves that in Phase 1 — the key
-    (an api.data.gov key) works across ERS APIs regardless.
 - **BigQuery REST** — `https://bigquery.googleapis.com/bigquery/v2/projects/usda-food-prices/...`
   - Auth: mint an OAuth token from `secrets/gcp-service-account.json` (scope
     `https://www.googleapis.com/auth/bigquery`). A dry-run query job returned 200.
@@ -102,6 +112,9 @@ billing posture before heavy use (Sandbox = no billing account = cannot be charg
 otherwise rely on free tier + budget alerts). USDA APIs are free, capped at 1,000
 requests/hour per key (HTTP 429 when exceeded).
 
-**Next: Phase 1 — ingestion.** Build the scripts under
-`src/usda_food_price_pipeline/ingestion/` that pull from the two USDA APIs and batch-load
-raw data into BigQuery. (Batch loads are free; avoid streaming inserts, which cost money.)
+**Next: Phase 1 — ingestion → LOCAL FILES ONLY.** Build Python scripts under
+`src/usda_food_price_pipeline/ingestion/` that pull from both USDA APIs and save raw,
+timestamped JSON to `data/raw/nutrition/` and `data/raw/prices/`. Handle pagination, the
+1,000 req/hour rate limit, and retries with backoff; add unit tests for the non-network
+logic (mock the HTTP calls). **Do NOT add BigQuery, cloud, orchestration, or dashboard code
+in Phase 1 — BigQuery loading is Phase 2.**
