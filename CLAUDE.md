@@ -61,8 +61,27 @@ the corresponding phase is explicitly started.
 
 ## Current state
 
-Only the **scaffold** exists: repository structure, virtual environment, ingestion-phase
-`requirements.txt`, env templates, `.gitignore`, README, and this file. No ingestion,
-transformation, or dashboard code has been written yet.
+**Phase 0 (scaffold) is COMPLETE and fully provisioned** (as of 2026-06-20):
 
-**Next:** Phase 1 — ingestion.
+- Repository structure, virtual environment, ingestion-phase `requirements.txt`, env
+  templates, `.gitignore`, README, and this file all exist.
+- Git initialized and pushed to GitHub: https://github.com/Mikepelgar/USDA-Food-Price
+  (branch `main`; repo-local commit email `Mikepelgar@users.noreply.github.com`).
+- **All three credentials are filled in and verified to authenticate** (checked
+  2026-06-20): `FDC_API_KEY` (FoodData Central, 200 OK), `ERS_API_KEY` (ERS ARMS API,
+  200 OK), and the GCP service-account JSON at `secrets/gcp-service-account.json`
+  (BigQuery token minted + dry-run query 200 OK; project `usda-food-prices`).
+- No ingestion, transformation, or dashboard code has been written yet.
+
+**Venv note:** `google-auth` was installed into `.venv` ad hoc for the credential check
+but is intentionally NOT in `requirements.txt`. In Phase 1, add the real warehouse
+client (likely `google-cloud-bigquery`) to `requirements.txt` properly.
+
+**Billing note:** the user wants to stay on the **free tier only**. Confirm BigQuery
+billing posture before heavy use (Sandbox = no billing account = cannot be charged;
+otherwise rely on free tier + budget alerts). USDA APIs are free, capped at 1,000
+requests/hour per key (HTTP 429 when exceeded).
+
+**Next: Phase 1 — ingestion.** Build the scripts under
+`src/usda_food_price_pipeline/ingestion/` that pull from the two USDA APIs and batch-load
+raw data into BigQuery. (Batch loads are free; avoid streaming inserts, which cost money.)
