@@ -59,6 +59,26 @@ the corresponding phase is explicitly started.
 - **Dependencies:** keep `requirements.txt` minimal and phase-scoped; document why each is
   added.
 
+## API reference (endpoints verified working in Phase 0)
+
+These exact calls returned HTTP 200 with the project's real keys on 2026-06-20.
+
+- **USDA FoodData Central (nutrition)** — base `https://api.nal.usda.gov/fdc/v1`
+  - Verified: `GET /foods/search?query=<term>&pageSize=<n>&api_key=$FDC_API_KEY`
+  - Other documented endpoints: `/food/{fdcId}`, `/foods`, `/foods/list`.
+  - Docs: https://fdc.nal.usda.gov/api-guide.html
+- **USDA ERS ARMS Data API** — base `https://api.ers.usda.gov/data/arms`
+  - Verified: `GET /year?api_key=$ERS_API_KEY`
+  - Other documented endpoints: `/state`, `/report`, `/subject`, `/series`, `/surveydata`.
+  - Docs: https://www.ers.usda.gov/developer/data-apis/
+  - NOTE: ARMS is farm-financial data. If the project needs *retail food prices*
+    specifically, confirm which ERS dataset/endpoint serves that in Phase 1 — the key
+    (an api.data.gov key) works across ERS APIs regardless.
+- **BigQuery REST** — `https://bigquery.googleapis.com/bigquery/v2/projects/usda-food-prices/...`
+  - Auth: mint an OAuth token from `secrets/gcp-service-account.json` (scope
+    `https://www.googleapis.com/auth/bigquery`). A dry-run query job returned 200.
+- Both USDA keys are api.data.gov keys: rate-limited to 1,000 requests/hour (HTTP 429).
+
 ## Current state
 
 **Phase 0 (scaffold) is COMPLETE and fully provisioned** (as of 2026-06-20):
