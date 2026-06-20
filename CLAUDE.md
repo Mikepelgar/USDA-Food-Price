@@ -34,9 +34,10 @@ api.data.gov ─────┘                                      (SQL)
 ## Phase plan
 
 0. **Phase 0 — Scaffold (DONE):** repo structure, venv, env templates, git + GitHub.
-1. **Phase 1 — Ingestion → LOCAL FILES ONLY:** Python scripts pull from both USDA APIs and
-   save raw, timestamped JSON to `data/raw/nutrition/` and `data/raw/prices/`. **No cloud,
-   warehouse, orchestration, or dashboard code in this phase.**
+1. **Phase 1 — Ingestion → LOCAL FILES ONLY:** Python scripts pull nutrition (FoodData
+   Central API) and prices (ERS F-MAP file download + BLS API) and save raw output to
+   `data/raw/nutrition/`, `data/raw/prices/fmap/`, and `data/raw/prices/bls/`. `data/` is
+   gitignored. **No cloud, warehouse, orchestration, or dashboard code in this phase.**
 2. **Phase 2 — Load to BigQuery:** a loader reads the raw JSON files and loads them as-is
    into raw/staging tables in BigQuery (idempotent re-runs). No transformation yet.
 3. **Phase 3 — Transformation (dbt on BigQuery):** staging + analytics models, including the
@@ -77,13 +78,21 @@ These exact calls returned HTTP 200 with the project's real keys on 2026-06-20.
   - Verified: `GET /foods/search?query=<term>&pageSize=<n>&api_key=$FDC_API_KEY`
   - Other documented endpoints: `/food/{fdcId}`, `/foods`, `/foods/list`.
   - Docs: https://fdc.nal.usda.gov/api-guide.html
-- **USDA ERS (price data)** — intended dataset is **Food-at-Home Monthly Area Prices**,
-  accessed via the api.data.gov service using `$ERS_API_KEY` (an api.data.gov key).
-  - Key validated in Phase 0 against the ERS ARMS API base
-    `https://api.ers.usda.gov/data/arms` (`GET /year` → 200), which only confirms the key
-    works. In Phase 1, confirm the exact endpoint/dataset for **Food-at-Home Monthly Area
-    Prices** (monthly food prices by category and region) — that, not ARMS, is the target.
-  - Docs: https://www.ers.usda.gov/developer/data-apis/
+Price data comes from TWO sources (decided 2026-06-20 — the ERS F-MAP dataset has no API):
+
+- **USDA ERS Food-at-Home Monthly Area Prices (F-MAP)** — **file download, NOT an API.**
+  Covers 2012–2018; 90 food categories × 15 geographic areas, monthly. In Phase 1, download
+  the raw data file(s) as-is and save to `data/raw/prices/fmap/`; do NOT parse them yet.
+  No API key needed.
+  - Page: https://www.ers.usda.gov/data-products/food-at-home-monthly-area-prices
+- **BLS average retail food prices** — **real JSON API** (current/ongoing monthly "APU"
+  Average Price Data series). This is the live, forecastable price feed. Optional free key
+  `BLS_API_KEY` raises the daily limit; add it to `.env`/`.env.example` in Phase 1. Save raw
+  responses to `data/raw/prices/bls/`. NOTE: BLS is not USDA.
+  - API docs: https://www.bls.gov/developers/ · register: https://data.bls.gov/registrationEngine/
+- **USDA ERS ARMS API** (validated, not currently a project source): base
+  `https://api.ers.usda.gov/data/arms` (`GET /year` → 200 in Phase 0). `ERS_API_KEY` is an
+  api.data.gov key kept for possible future ERS API use; F-MAP does not need it.
 - **BigQuery REST** — `https://bigquery.googleapis.com/bigquery/v2/projects/usda-food-prices/...`
   - Auth: mint an OAuth token from `secrets/gcp-service-account.json` (scope
     `https://www.googleapis.com/auth/bigquery`). A dry-run query job returned 200.
@@ -113,8 +122,12 @@ otherwise rely on free tier + budget alerts). USDA APIs are free, capped at 1,00
 requests/hour per key (HTTP 429 when exceeded).
 
 **Next: Phase 1 — ingestion → LOCAL FILES ONLY.** Build Python scripts under
-`src/usda_food_price_pipeline/ingestion/` that pull from both USDA APIs and save raw,
-timestamped JSON to `data/raw/nutrition/` and `data/raw/prices/`. Handle pagination, the
-1,000 req/hour rate limit, and retries with backoff; add unit tests for the non-network
-logic (mock the HTTP calls). **Do NOT add BigQuery, cloud, orchestration, or dashboard code
-in Phase 1 — BigQuery loading is Phase 2.**
+`src/usda_food_price_pipeline/ingestion/` that save raw output locally only:
+- Nutrition: FoodData Central API (`FDC_API_KEY`) → `data/raw/nutrition/` (timestamped JSON;
+  paginate, respect 1,000 req/hour, retry with backoff; scope to a sample, not the whole DB).
+- Prices, source 1: ERS F-MAP **file download** (no API/key) → `data/raw/prices/fmap/` raw,
+  unparsed.
+- Prices, source 2: BLS Average Price API (optional `BLS_API_KEY`) → `data/raw/prices/bls/`.
+Add `data/` to `.gitignore`. Add unit tests for non-network logic (mock all HTTP). No new
+deps needed beyond `requests`/`python-dotenv`/`pytest`. **Do NOT add BigQuery, cloud,
+orchestration, or dashboard code — BigQuery loading is Phase 2.**
