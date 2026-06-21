@@ -24,8 +24,8 @@ api.data.gov ─────┘                                      (SQL)
 3. **Transformation** — SQL transforms raw data into clean, modeled tables.
 4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
 
-> Status: project skeleton only. Ingestion, transformation, and dashboard code come in
-> later phases.
+> Status: Phase 1 (ingestion → local raw files) is built. Warehouse, transformation, and
+> dashboard code come in later phases.
 
 ## Setup
 
@@ -39,6 +39,43 @@ pip install -r requirements.txt
 
 # Configure secrets
 copy .env.example .env   # then fill in your keys
+```
+
+## Phase 1 — Ingestion (raw local files)
+
+Three scripts pull raw data and write it under `data/raw/` (gitignored — nothing is
+committed). Run them as modules; on Windows PowerShell set `PYTHONPATH` first so the
+`src/`-layout package is importable:
+
+```powershell
+$env:PYTHONPATH = "src"     # bash: export PYTHONPATH=src
+```
+
+| Script | Source | Needs | Output |
+| ------ | ------ | ----- | ------ |
+| `nutrition_fdc` | FoodData Central API (`/foods/search`) | `FDC_API_KEY` | `data/raw/nutrition/fdc_search_<query>_p<NN>_<timestamp>.json` |
+| `prices_fmap` | ERS F-MAP (file download, no API) | none | `data/raw/prices/fmap/<timestamp>_<filename>.xlsx` |
+| `prices_bls` | BLS Average Price API (APU series) | `BLS_API_KEY` (optional) | `data/raw/prices/bls/bls_ap_<timestamp>.json` |
+
+```powershell
+# 1. Nutrition — paginates a sample of food queries, rate-limited + retried
+python -m usda_food_price_pipeline.ingestion.nutrition_fdc
+#    options: --queries "apple" "milk"  --page-size 50  --max-pages 2
+
+# 2. Prices, source A — ERS F-MAP raw file(s) (downloaded as-is, not parsed)
+python -m usda_food_price_pipeline.ingestion.prices_fmap
+#    offline fallback: copy a file you already downloaded
+python -m usda_food_price_pipeline.ingestion.prices_fmap --from-file $HOME\Downloads\FMAP.xlsx
+
+# 3. Prices, source B — BLS retail food prices (v2 if BLS_API_KEY set, else v1)
+python -m usda_food_price_pipeline.ingestion.prices_bls
+#    options: --series APU0000708111 ...  --start-year 2020 --end-year 2026
+```
+
+Run the tests (HTTP is fully mocked — no network, no keys needed):
+
+```powershell
+python -m pytest
 ```
 
 ## Repository Layout

@@ -1,0 +1,5 @@
+# Minimal config so pytest can import the src-layout package without an install.
+# (Not a packaging/build manifest — packaging metadata can come in a later phase.)
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
