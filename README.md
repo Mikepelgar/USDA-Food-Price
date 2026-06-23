@@ -24,8 +24,8 @@ api.data.gov ─────┘                                      (SQL)
 3. **Transformation** — SQL transforms raw data into clean, modeled tables.
 4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
 
-> Status: Phase 1 (ingestion → local raw files) is built. Warehouse, transformation, and
-> dashboard code come in later phases.
+> Status: Phase 1 (ingestion → local raw files) and Phase 2 (load raw files → BigQuery)
+> are built. Transformation (dbt), orchestration, and dashboard code come in later phases.
 
 ## Setup
 
@@ -78,12 +78,52 @@ Run the tests (HTTP is fully mocked — no network, no keys needed):
 python -m pytest
 ```
 
+## Phase 2 — Load to BigQuery
+
+A loader reads the Phase-1 raw files and **batch-loads them essentially as-is** into
+three raw tables in BigQuery (no cleaning/joining — that's Phase 3/dbt):
+
+| Raw table | Source files | Reshaping (minimal) |
+| --------- | ------------ | ------------------- |
+| `raw_nutrition`  | `data/raw/nutrition/*.json`    | one row per food (the `foods` array); full food kept in `raw_json` |
+| `raw_prices_bls` | `data/raw/prices/bls/*.json`   | one row per observation (`Results.series[].data[]` flattened) |
+| `raw_prices_fmap`| `data/raw/prices/fmap/*.xlsx`  | one row per worksheet row (header → a JSON record in `raw_json`) |
+
+Loads are **idempotent**: each table is loaded with `WRITE_TRUNCATE` in a single
+batch load (free — no streaming inserts), so re-running fully replaces the table
+with no duplicates. The loader then prints row counts per table to verify.
+
+**One-time Google Cloud setup (beginner, minimal):**
+
+1. **Service-account JSON** — already at `secrets/gcp-service-account.json`
+   (gitignored). `.env` points to it: `GOOGLE_APPLICATION_CREDENTIALS=./secrets/gcp-service-account.json`.
+2. **Dataset** — you don't create it by hand; the loader creates dataset `usda_raw`
+   in project `usda-food-prices` (US) on first run if it's missing. (To make it
+   manually instead: `bq --location=US mk -d usda-food-prices:usda_raw`.)
+3. **Free tier / billing** — confirm in the Cloud Console under *Billing*:
+   - **BigQuery Sandbox** (no billing account linked) = you *cannot* be charged;
+     tables get a 60-day expiry. This is the safest posture for this project.
+   - With a billing account linked, you're on the **free tier** (10 GB storage +
+     1 TB queries/month); batch loads cost nothing. Set a budget alert to be safe.
+
+```powershell
+$env:PYTHONPATH = "src"     # bash: export PYTHONPATH=src
+
+# Parse the raw files and print row counts WITHOUT touching BigQuery:
+python -m usda_food_price_pipeline.load.bigquery_loader --dry-run
+
+# Load all three raw tables into BigQuery (idempotent; prints row counts):
+python -m usda_food_price_pipeline.load.bigquery_loader
+#    options: --dataset usda_raw  --location US  --only nutrition bls fmap
+```
+
 ## Repository Layout
 
 | Path                              | Purpose                                              |
 | --------------------------------- | ---------------------------------------------------- |
 | `src/usda_food_price_pipeline/`   | Python package (importable source code)              |
 | `src/.../ingestion/`              | Ingestion scripts that pull from the USDA APIs       |
+| `src/.../load/`                   | Phase-2 loader: raw files → BigQuery raw tables       |
 | `config/`                         | Non-secret configuration files                       |
 | `tests/`                          | Automated tests (pytest)                             |
 | `docs/`                           | Project documentation                                |
