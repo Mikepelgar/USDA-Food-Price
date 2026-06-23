@@ -74,6 +74,13 @@ explicitly started — keep each session focused on its single phase.
   (`usda_food_price_pipeline`).
 - **Dependencies:** keep `requirements.txt` minimal and phase-scoped; document why each is
   added.
+- **End-of-session update (REQUIRED):** at the end of **every** session, before wrapping up,
+  update this `CLAUDE.md` so it reflects what changed — keep "What exists" and especially
+  "Current state" / "Next" accurate (convert relative dates to absolute) — then **commit and
+  push it to `main`** so the copy on GitHub matches the local file. A docs-only update to
+  `CLAUDE.md` may be committed directly to `main` (no branch/PR needed); reserve the
+  branch + PR workflow for phase code. End the commit message with the
+  `Co-Authored-By: Claude …` trailer per the repo's git convention.
 
 ## API reference (endpoints verified working in Phase 0)
 
@@ -147,7 +154,7 @@ project `usda-food-prices`).
   works without installing the package. **No deps added** beyond `requests`/`python-dotenv`/
   `pytest`. `.env.example` now includes `BLS_API_KEY`; `data/` is gitignored.
 
-**Phase 2 (load raw files → BigQuery) — COMPLETE (code; user runs it to land rows).**
+**Phase 2 (load raw files → BigQuery) — COMPLETE and run (rows landed 2026-06-23).**
 Reads the Phase-1 raw files and **batch-loads them essentially as-is** (no cleaning, casting,
 or joining — that's Phase 3/dbt). Run as a module with `PYTHONPATH=src`. Added deps:
 `google-cloud-bigquery` + `openpyxl` (F-MAP is `.xlsx`; BigQuery can't load `.xlsx` directly).
@@ -174,28 +181,57 @@ or joining — that's Phase 3/dbt). Run as a module with `PYTHONPATH=src`. Added
   - Pure row builders (`nutrition_rows_from_page`, `bls_rows_from_response`,
     `fmap_rows_from_sheet`) are unit-tested with no network/BigQuery; the BigQuery client is
     imported lazily. `tests/test_bigquery_loader.py` adds 8 tests (35 total, all pass).
-  - Verified row counts via `--dry-run` on the real Phase-1 files: `raw_nutrition` 1,500
-    (30 files × 50), `raw_prices_bls` 327 (1 file), `raw_prices_fmap` 162,262 (2 files,
-    incl. both `ReadMe` + `Data` sheets).
+  - **Run + verified for real (2026-06-23):** the user ran the loader; it created dataset
+    `usda_raw` and landed `raw_nutrition` 1,500 (30 files × 50), `raw_prices_bls` 327
+    (1 file), `raw_prices_fmap` 162,262 (2 files, incl. both `ReadMe` + `Data` sheets) —
+    confirmed in the BigQuery console. Merged to `main` via PR #2.
 
 ## Current state
 
-**Phases 1 and 2 are done in code. The user runs the loader
-(`python -m usda_food_price_pipeline.load.bigquery_loader`, with `PYTHONPATH=src`) to land
-real rows in BigQuery dataset `usda_raw` (tables `raw_nutrition`, `raw_prices_bls`,
-`raw_prices_fmap`).** No transformation, orchestration, or dashboard code exists yet.
+**Phases 0–2 are COMPLETE and on `main`.** As of 2026-06-23 the loader has been **run for
+real**: BigQuery dataset `usda_raw` exists in project `usda-food-prices` with three populated
+raw tables — `raw_nutrition` (1,500 rows), `raw_prices_bls` (327), `raw_prices_fmap`
+(162,262) — verified in the console. Phase 2 merged via PR #2. No transformation,
+orchestration, or dashboard code exists yet.
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
 check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl` to
-`requirements.txt` — run `pip install -r requirements.txt` before running the loader.
+`requirements.txt` — always `pip install -r requirements.txt` in the activated `.venv` first.
 
-**Billing note:** the user wants to stay on the **free tier only**. Confirm BigQuery
-billing posture before heavy use (Sandbox = no billing account = cannot be charged;
-otherwise rely on free tier + budget alerts). The loader uses batch loads (free) and reads
-row counts from table metadata (not billed queries). USDA APIs are free, capped at 1,000
-requests/hour per key (HTTP 429 when exceeded).
+**Billing note (CONFIRMED 2026-06-23):** the user has **no billing account linked**, so the
+project runs in **BigQuery Sandbox = cannot be charged**. Caveat: Sandbox auto-expires every
+table ~60 days after creation (re-run ingestion + loader to recreate; raw files in
+`data/raw/` are the source of truth) and forbids streaming inserts (we only batch-load, so
+fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when exceeded).
 
-**Next: Phase 3 — Transformation (dbt on BigQuery).** Build staging + analytics models on
-top of the `usda_raw.*` tables (parse the `raw_json` columns, cast/standardize, the
-nutrition-per-dollar join), with dbt tests + docs. No cleaning/joining was done in Phase 2 by
-design — it all belongs here.
+## Next: Phase 3 — Transformation (dbt on BigQuery)
+
+Build staging + analytics models on top of the `usda_raw.*` tables, with dbt tests + docs.
+No cleaning/casting/joining was done in Phase 2 by design — it ALL belongs here. Start a
+fresh session focused only on Phase 3.
+
+**Setup the next session will need:**
+- Add the dbt adapter to `requirements.txt` (phase-scoped): `dbt-bigquery` (pulls in `dbt-core`).
+- Create a dbt project (e.g. under `transform/` or `dbt/`). Configure `profiles.yml` to use
+  BigQuery with `method: service-account` and `keyfile` = the same
+  `secrets/gcp-service-account.json` (or `oauth`); project `usda-food-prices`, location `US`.
+  Use dbt target datasets like `usda_staging` / `usda_analytics` (dbt creates them; in Sandbox
+  they get the 60-day expiry too). Keep secrets out of git.
+- Source = the three `usda_raw` tables. The payloads are JSON strings — parse with BigQuery
+  `JSON_VALUE` / `PARSE_JSON` / `JSON_QUERY` (or dbt macros).
+
+**Source shapes to parse (already verified):**
+- `raw_nutrition.raw_json` = one full FDC food object: `description`, `dataType`
+  (Branded / Foundation / SR Legacy / Survey), `foodCategory`, and `foodNutrients[]` (each has
+  `nutrientName`/`nutrientNumber`, `value`, `unitName`). `fdc_id` is promoted to its own column.
+- `raw_prices_bls`: already flat-ish — `series_id` (maps to a food via `DEFAULT_SERIES` in
+  `ingestion/prices_bls.py`), `year`, `period` (`M01`–`M12` monthly, `M13` = annual avg),
+  `value` (price string — cast to numeric), `latest`.
+- `raw_prices_fmap`: filter to `sheet_name = 'Data'` (drop `ReadMe`). Parse `raw_json` keys
+  `Year, Month, EFPG_name, EFPG_code, Metroregion_name, Metroregion_code,
+  Purchase_dollars_wtd, Purchase_grams_wtd` (price ≈ dollars / grams). The supplemental file
+  adds a few extra index columns; the core columns above are shared by both files.
+
+**Deliverables:** staging models (one per source, typed/cleaned), analytics models incl. the
+nutrition-per-dollar join, dbt tests (not_null/unique/relationships) + `dbt docs`. Build one
+phase at a time — do not start Phase 4 in the same session.
