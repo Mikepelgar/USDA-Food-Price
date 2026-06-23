@@ -1,6 +1,10 @@
-# Ingestion-phase dependencies only. More will be added in later phases
-# (warehouse client, transformation, dashboard, forecasting).
+# Dependencies are added per phase, not preemptively.
 
-requests        # HTTP client for calling the USDA APIs
-python-dotenv   # loads environment variables from a .env file
-pytest          # testing framework
+# --- Phase 1: ingestion (USDA API calls -> local raw files) ---
+requests               # HTTP client for calling the USDA APIs
+python-dotenv          # loads environment variables from a .env file
+pytest                 # testing framework
+
+# --- Phase 2: load raw files -> BigQuery ---
+google-cloud-bigquery  # warehouse client; batch-loads raw files into BigQuery
+openpyxl               # reads the F-MAP .xlsx files (BigQuery cannot load .xlsx directly)

@@ -147,23 +147,55 @@ project `usda-food-prices`).
   works without installing the package. **No deps added** beyond `requests`/`python-dotenv`/
   `pytest`. `.env.example` now includes `BLS_API_KEY`; `data/` is gitignored.
 
+**Phase 2 (load raw files → BigQuery) — COMPLETE (code; user runs it to land rows).**
+Reads the Phase-1 raw files and **batch-loads them essentially as-is** (no cleaning, casting,
+or joining — that's Phase 3/dbt). Run as a module with `PYTHONPATH=src`. Added deps:
+`google-cloud-bigquery` + `openpyxl` (F-MAP is `.xlsx`; BigQuery can't load `.xlsx` directly).
+
+- **`src/usda_food_price_pipeline/load/bigquery_loader.py`** — the loader.
+  - **Dataset:** `usda_raw` in project `usda-food-prices` (location `US`); created on first
+    run if missing (`ensure_dataset`). Overridable via `--dataset`/`BIGQUERY_DATASET`,
+    `--location`/`BIGQUERY_LOCATION`, project via `BIGQUERY_PROJECT` (else inferred from the
+    service-account credentials). Auth via `GOOGLE_APPLICATION_CREDENTIALS`.
+  - **Three raw tables** (explicit schemas, autodetect off):
+    - `raw_nutrition` ← `data/raw/nutrition/*.json`: one row per food (the `foods` array);
+      cols `source_file, fdc_id, raw_json (full food verbatim), loaded_at`.
+    - `raw_prices_bls` ← `data/raw/prices/bls/*.json`: flattens `Results.series[].data[]`,
+      one row per observation; cols `source_file, series_id, year, period, period_name,
+      value, latest, footnotes (JSON str), loaded_at` (values kept as API strings).
+    - `raw_prices_fmap` ← `data/raw/prices/fmap/*.xlsx`: every sheet, header row → a
+      `{header: cell}` JSON record; cols `source_file, sheet_name, row_index, raw_json,
+      loaded_at`. Reads `.xlsx` with `openpyxl` (read-only, `data_only`).
+  - **Idempotency:** each table is loaded in a single batch load job with `WRITE_TRUNCATE`
+    (free; never streaming inserts), so re-running fully replaces the table — no duplicates.
+  - **Verification:** after loading, prints row counts per table via `get_table().num_rows`
+    (table metadata, not a billed query). `--dry-run` parses files + prints counts WITHOUT
+    touching BigQuery (handy to confirm parsing before any cloud call); `--only` limits sources.
+  - Pure row builders (`nutrition_rows_from_page`, `bls_rows_from_response`,
+    `fmap_rows_from_sheet`) are unit-tested with no network/BigQuery; the BigQuery client is
+    imported lazily. `tests/test_bigquery_loader.py` adds 8 tests (35 total, all pass).
+  - Verified row counts via `--dry-run` on the real Phase-1 files: `raw_nutrition` 1,500
+    (30 files × 50), `raw_prices_bls` 327 (1 file), `raw_prices_fmap` 162,262 (2 files,
+    incl. both `ReadMe` + `Data` sheets).
+
 ## Current state
 
-**Phase 1 is done; the user runs the scripts to confirm real data lands in
-`data/raw/{nutrition,prices/fmap,prices/bls}/`.** No transformation, warehouse, orchestration,
-or dashboard code exists yet.
+**Phases 1 and 2 are done in code. The user runs the loader
+(`python -m usda_food_price_pipeline.load.bigquery_loader`, with `PYTHONPATH=src`) to land
+real rows in BigQuery dataset `usda_raw` (tables `raw_nutrition`, `raw_prices_bls`,
+`raw_prices_fmap`).** No transformation, orchestration, or dashboard code exists yet.
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
-check but is intentionally NOT in `requirements.txt`. In Phase 2, add the real warehouse
-client (likely `google-cloud-bigquery`) to `requirements.txt` properly.
+check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl` to
+`requirements.txt` — run `pip install -r requirements.txt` before running the loader.
 
 **Billing note:** the user wants to stay on the **free tier only**. Confirm BigQuery
 billing posture before heavy use (Sandbox = no billing account = cannot be charged;
-otherwise rely on free tier + budget alerts). USDA APIs are free, capped at 1,000
+otherwise rely on free tier + budget alerts). The loader uses batch loads (free) and reads
+row counts from table metadata (not billed queries). USDA APIs are free, capped at 1,000
 requests/hour per key (HTTP 429 when exceeded).
 
-**Next: Phase 2 — Load to BigQuery.** A loader reads the raw JSON/XLSX files from `data/raw/`
-and loads them as-is into raw/staging tables in BigQuery (project `usda-food-prices`,
-authenticated via `GOOGLE_APPLICATION_CREDENTIALS`), with idempotent re-runs. No
-transformation yet (that's Phase 3 / dbt). Add `google-cloud-bigquery` to `requirements.txt`.
-Stay within the free tier.
+**Next: Phase 3 — Transformation (dbt on BigQuery).** Build staging + analytics models on
+top of the `usda_raw.*` tables (parse the `raw_json` columns, cast/standardize, the
+nutrition-per-dollar join), with dbt tests + docs. No cleaning/joining was done in Phase 2 by
+design — it all belongs here.
