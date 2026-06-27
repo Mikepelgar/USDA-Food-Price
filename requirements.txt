@@ -8,3 +8,6 @@ pytest                 # testing framework
 # --- Phase 2: load raw files -> BigQuery ---
 google-cloud-bigquery  # warehouse client; batch-loads raw files into BigQuery
 openpyxl               # reads the F-MAP .xlsx files (BigQuery cannot load .xlsx directly)
+
+# --- Phase 3: transformation (dbt on BigQuery) ---
+dbt-bigquery>=1.7,<2.0  # dbt adapter for BigQuery (pulls in dbt-core); runs the SQL transforms. Then `dbt deps` for dbt_utils.

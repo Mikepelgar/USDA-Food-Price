@@ -27,3 +27,11 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# --- Phase 3: dbt (transform/) — keep secrets + build artifacts out of git ---
+# (transform/profiles.example.yml stays tracked as the template)
+transform/profiles.yml
+transform/target/
+transform/dbt_packages/
+transform/logs/
+transform/.user.yml

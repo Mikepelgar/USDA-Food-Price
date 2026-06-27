@@ -24,8 +24,8 @@ api.data.gov ─────┘                                      (SQL)
 3. **Transformation** — SQL transforms raw data into clean, modeled tables.
 4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
 
-> Status: Phase 1 (ingestion → local raw files) and Phase 2 (load raw files → BigQuery)
-> are built. Transformation (dbt), orchestration, and dashboard code come in later phases.
+> Status: Phases 1–3 are built — ingestion (→ local raw files), load (raw files → BigQuery),
+> and transformation (dbt models on BigQuery). Orchestration and dashboard code come in later phases.
 
 ## Setup
 
@@ -117,6 +117,75 @@ python -m usda_food_price_pipeline.load.bigquery_loader
 #    options: --dataset usda_raw  --location US  --only nutrition bls fmap
 ```
 
+## Phase 3 — Transformation (dbt)
+
+A [dbt](https://docs.getdbt.com/) project under `transform/` turns the three raw `usda_raw`
+tables into clean, tested, documented analytics tables on BigQuery: **4 staging views**
+(`stg_nutrition`, `stg_prices_bls`, `stg_prices_fmap`, `stg_fmap_price_index`) in dataset
+`usda_staging`, and **4 analytics tables** in `usda_analytics`:
+
+| Analytics table | Grain | What it is |
+| --------------- | ----- | ---------- |
+| `fct_fmap_prices` | category × region × month | ERS F-MAP monthly mean-unit-value price (USD/100 g) + price index, 2012–2018 |
+| `fct_bls_prices` | item × month | BLS current monthly retail price series — the forecast input for Phase 5 |
+| `dim_nutrition` | FDC food category | median nutrients per 100 g (non-Branded foods) |
+| `fct_nutrition_per_dollar` | category × region × month | nutrients **per dollar**, ranked by protein/$ — F-MAP price ⋈ nutrition via a category crosswalk |
+
+Two seeds support these: `category_crosswalk.csv` (F-MAP category → FDC food category — see the
+note below) and `bls_series_items.csv` (BLS series id → item label).
+
+### How dbt connects to BigQuery (beginner notes)
+
+- **`profiles.yml` is dbt's database-connection file.** `dbt_project.yml` (committed, in
+  `transform/`) names a `profile`; dbt looks that name up in `profiles.yml` to learn *which
+  warehouse, project/dataset, and credentials* to use. Keeping the connection separate from the
+  SQL is what lets the same models run against different targets.
+- **The connection** uses BigQuery `method: service-account` with `keyfile:` pointing at the
+  **same** `secrets/gcp-service-account.json` the Phase-2 loader uses. dbt mints a token from
+  that key and runs query jobs in project `usda-food-prices` (free tier / Sandbox; no streaming).
+- **Secrets stay out of git.** The keyfile is already gitignored, and `profiles.yml` only stores
+  a *path* to it (never the key). The committed template is
+  [`transform/profiles.example.yml`](transform/profiles.example.yml); your real `profiles.yml` is
+  gitignored. Easiest setup: copy it to `transform/profiles.yml` and run dbt **from** `transform/`
+  with `--profiles-dir .` (so the relative `keyfile` path resolves). Alternatively keep it at
+  dbt's default `~/.dbt/profiles.yml` with an absolute keyfile path.
+
+### Run it
+
+```powershell
+# from the repo root, in the activated .venv:
+pip install -r requirements.txt          # now includes dbt-bigquery
+
+cd transform
+copy profiles.example.yml profiles.yml   # then confirm the keyfile path is correct
+dbt deps                                 # installs dbt_utils (see packages.yml)
+dbt debug --profiles-dir .               # verifies the BigQuery connection ("Connection test: OK")
+
+# build everything (seeds -> staging views -> analytics tables) AND run all tests, in order:
+dbt build --profiles-dir .
+# or run just the tests:
+dbt test  --profiles-dir .
+```
+
+`dbt build` already runs seeds, models, and tests together in dependency order — you do **not**
+need to run `dbt seed` / `dbt run` / `dbt test` separately (each exists if you want a single
+stage). Tests cover not-null/unique keys, prices never negative, plausible nutrient ranges, and a
+uniqueness check on the F-MAP category-month-region grain.
+
+Browse the generated docs (model + column descriptions and the lineage graph):
+
+```powershell
+dbt docs generate --profiles-dir .
+dbt docs serve    --profiles-dir .
+```
+
+> **Category crosswalk note.** FDC food categories (e.g. *dairy and egg products*) and F-MAP
+> price categories (e.g. *whole milk*) do **not** line up one-to-one, so the nutrition-per-dollar
+> model joins them through `transform/seeds/category_crosswalk.csv` rather than assuming the keys
+> match. It is a small, curated, intentionally-lossy mapping over the overlapping food basket;
+> categories with no clean match are left out. `fct_nutrition_per_dollar` therefore uses
+> **historical** F-MAP prices (2012–2018) — `fct_bls_prices` is the current/forecastable feed.
+
 ## Repository Layout
 
 | Path                              | Purpose                                              |
@@ -124,6 +193,7 @@ python -m usda_food_price_pipeline.load.bigquery_loader
 | `src/usda_food_price_pipeline/`   | Python package (importable source code)              |
 | `src/.../ingestion/`              | Ingestion scripts that pull from the USDA APIs       |
 | `src/.../load/`                   | Phase-2 loader: raw files → BigQuery raw tables       |
+| `transform/`                      | Phase-3 dbt project: staging + analytics models, seeds, tests |
 | `config/`                         | Non-secret configuration files                       |
 | `tests/`                          | Automated tests (pytest)                             |
 | `docs/`                           | Project documentation                                |

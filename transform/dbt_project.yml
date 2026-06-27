@@ -1,0 +1,41 @@
+name: 'usda_food_prices'
+version: '1.0.0'
+config-version: 2
+
+# Models connect to BigQuery via the 'usda_food_prices' profile.
+# See transform/profiles.example.yml and the README "Phase 3 — Transformation (dbt)".
+profile: 'usda_food_prices'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+require-dbt-version: [">=1.7.0", "<2.0.0"]
+
+models:
+  usda_food_prices:
+    staging:
+      +schema: usda_staging      # used verbatim (see macros/generate_schema_name.sql)
+      +materialized: view
+    analytics:
+      +schema: usda_analytics
+      +materialized: table
+
+seeds:
+  usda_food_prices:
+    +schema: usda_analytics
+    category_crosswalk:
+      +column_types:
+        fmap_efpg_name: STRING
+        fmap_efpg_code: INT64
+        fdc_food_category: STRING
+        notes: STRING
+    bls_series_items:
+      +column_types:
+        series_id: STRING
+        item_label: STRING
+        unit: STRING

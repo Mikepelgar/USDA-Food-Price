@@ -186,17 +186,57 @@ or joining — that's Phase 3/dbt). Run as a module with `PYTHONPATH=src`. Added
     (1 file), `raw_prices_fmap` 162,262 (2 files, incl. both `ReadMe` + `Data` sheets) —
     confirmed in the BigQuery console. Merged to `main` via PR #2.
 
+**Phase 3 (transformation — dbt on BigQuery) — COMPLETE 2026-06-27; `dbt build` ran clean
+(8 models, 2 seeds, 46 tests — all PASS) and the work is committed on a Phase-3 branch.** dbt project at
+**`transform/`** (profile `usda_food_prices`; `dbt-bigquery` added to `requirements.txt`,
+`dbt_utils` in `packages.yml`). Connects to BigQuery via `method: service-account` reusing
+`secrets/gcp-service-account.json`; the real `profiles.yml` is gitignored and
+`transform/profiles.example.yml` is the committed template (run dbt from `transform/` with
+`--profiles-dir .`). A `macros/generate_schema_name.sql` override makes custom schemas verbatim,
+so models land in datasets **`usda_staging`** (views) and **`usda_analytics`** (tables); dbt
+creates both on first run (Sandbox 60-day expiry applies).
+
+- **Source:** the three `usda_raw.*` tables (declared in `models/staging/_sources.yml`).
+- **Staging (views, 4)** — typed/cleaned/de-duped (`SAFE_CAST`; `LOWER`/`TRIM` + whitespace
+  collapse; deterministic `ROW_NUMBER` newest-wins on `loaded_at`):
+  - `stg_nutrition` — one row per `fdc_id`; standardized `food_category`; `foodNutrients` kept as JSON.
+  - `stg_prices_bls` — one row per (series_id, month); monthly only (`M01`–`M12`); `price_usd` numeric; item label via seed.
+  - `stg_prices_fmap` — F-MAP **main** workbook (2012–2018); `mean_unit_value` (USD/100 g, = ERS `Unit_value_mean_wtd`) + `price_index_geks`.
+  - `stg_fmap_price_index` — F-MAP **supplemental** workbook (2016–2018); alternative index methods only (Laspeyres/Paasche/Törnqvist/Fisher/GEKS/CCD).
+- **Analytics (tables, 4):**
+  - `fct_fmap_prices` — monthly price by category × region; main LEFT JOIN supplemental indexes; grain **(efpg_code, region_code, month_date)**.
+  - `fct_bls_prices` — current monthly price series by item (the **Phase-5 forecast input**); grain (series_id, month_date).
+  - `dim_nutrition` — nutrition per FDC `food_category` (per 100 g), **median** across non-Branded foods (Foundation/SR Legacy/Survey); grain (food_category).
+  - **`fct_nutrition_per_dollar`** — the combined model. Joins `fct_fmap_prices` → `category_crosswalk` (on `efpg_code`) → `dim_nutrition` (on `food_category`); computes `nutrient_g_per_100g / mean_unit_value` = grams per dollar; `protein_rank` window over (region, month). **Grain (efpg_code, region_code, month_date).** CAVEAT in its docs: HISTORICAL 2012–2018 prices + static nutrition (NOT current — `fct_bls_prices` is the current feed).
+- **Seeds:** `category_crosswalk.csv` (~20 rows; **F-MAP EFPG code → broad FDC `foodCategory`**;
+  intentionally lossy — FDC categories are broad while F-MAP is granular, so several priced
+  categories share one nutrition profile; only the food-basket overlap is mapped; every target is
+  a non-Branded category present in `dim_nutrition`) and `bls_series_items.csv` (8 series → label/unit,
+  mirrors `DEFAULT_SERIES`).
+- **Tests** (`_staging.yml`/`_analytics.yml`/`_seeds.yml`): not_null + unique on keys;
+  `dbt_utils.unique_combination_of_columns` on the F-MAP **(efpg_code, region_code, month_date)**
+  grain (also BLS + per-dollar grains); `dbt_utils.accepted_range(min_value:0)` on every
+  price/per-dollar column + plausible nutrient bounds; safe `relationships`
+  (`stg_prices_bls.series_id`→seed, `fct_nutrition_per_dollar.efpg_code`→crosswalk). Model +
+  column docs on all four analytics tables for `dbt docs`.
+- **Step 0 introspection (recorded):** F-MAP main `Data` sheet already carries the price
+  (`Unit_value_mean_wtd`) **and** `Price_index_GEKS` for all years (the supplemental file only
+  adds extra index methods, 2016–2018); 90 EFPG categories × 15 regions; nutrition data types
+  Branded 513 / Survey 502 / SR Legacy 442 / Foundation 34 / Experimental 9 (Branded+Experimental
+  excluded from nutrition); nutrientNumbers 203/204/205/208/291/301/303/307 confirmed present.
+
 ## Current state
 
-**Phases 0–2 are COMPLETE and on `main`.** As of 2026-06-23 the loader has been **run for
-real**: BigQuery dataset `usda_raw` exists in project `usda-food-prices` with three populated
-raw tables — `raw_nutrition` (1,500 rows), `raw_prices_bls` (327), `raw_prices_fmap`
-(162,262) — verified in the console. Phase 2 merged via PR #2. No transformation,
-orchestration, or dashboard code exists yet.
+**Phases 0–3 are COMPLETE.** Phase 3 (dbt) was built, run, and validated on 2026-06-27:
+`dbt build` from `transform/` created datasets `usda_staging` (4 staging views) and
+`usda_analytics` (4 analytics tables + 2 seeds) and **all 46 tests passed** (56 nodes, 0 errors).
+The work is committed on a Phase-3 branch (push/PR pending). BigQuery `usda_raw` still holds the
+Phase-2 raw tables. No orchestration or dashboard code exists yet.
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
-check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl` to
-`requirements.txt` — always `pip install -r requirements.txt` in the activated `.venv` first.
+check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
+`dbt-bigquery` (pulls in `dbt-core`) to `requirements.txt` — always `pip install -r
+requirements.txt` in the activated `.venv` first, then `dbt deps` (installs `dbt_utils`).
 
 **Billing note (CONFIRMED 2026-06-23):** the user has **no billing account linked**, so the
 project runs in **BigQuery Sandbox = cannot be charged**. Caveat: Sandbox auto-expires every
@@ -204,34 +244,13 @@ table ~60 days after creation (re-run ingestion + loader to recreate; raw files 
 `data/raw/` are the source of truth) and forbids streaming inserts (we only batch-load, so
 fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when exceeded).
 
-## Next: Phase 3 — Transformation (dbt on BigQuery)
+## Next: Phase 4 — Orchestration (Airflow + Docker)
 
-Build staging + analytics models on top of the `usda_raw.*` tables, with dbt tests + docs.
-No cleaning/casting/joining was done in Phase 2 by design — it ALL belongs here. Start a
-fresh session focused only on Phase 3.
+Phase 3 is built, validated, and committed (Phase-3 branch; PR pending). Start a **fresh session
+for Phase 4**: one Airflow DAG (run locally via Docker Compose) that runs
+ingest → load → `dbt build` → `dbt test` on a daily schedule with retries. Do not write Phase 4
+code until that phase is explicitly started.
 
-**Setup the next session will need:**
-- Add the dbt adapter to `requirements.txt` (phase-scoped): `dbt-bigquery` (pulls in `dbt-core`).
-- Create a dbt project (e.g. under `transform/` or `dbt/`). Configure `profiles.yml` to use
-  BigQuery with `method: service-account` and `keyfile` = the same
-  `secrets/gcp-service-account.json` (or `oauth`); project `usda-food-prices`, location `US`.
-  Use dbt target datasets like `usda_staging` / `usda_analytics` (dbt creates them; in Sandbox
-  they get the 60-day expiry too). Keep secrets out of git.
-- Source = the three `usda_raw` tables. The payloads are JSON strings — parse with BigQuery
-  `JSON_VALUE` / `PARSE_JSON` / `JSON_QUERY` (or dbt macros).
-
-**Source shapes to parse (already verified):**
-- `raw_nutrition.raw_json` = one full FDC food object: `description`, `dataType`
-  (Branded / Foundation / SR Legacy / Survey), `foodCategory`, and `foodNutrients[]` (each has
-  `nutrientName`/`nutrientNumber`, `value`, `unitName`). `fdc_id` is promoted to its own column.
-- `raw_prices_bls`: already flat-ish — `series_id` (maps to a food via `DEFAULT_SERIES` in
-  `ingestion/prices_bls.py`), `year`, `period` (`M01`–`M12` monthly, `M13` = annual avg),
-  `value` (price string — cast to numeric), `latest`.
-- `raw_prices_fmap`: filter to `sheet_name = 'Data'` (drop `ReadMe`). Parse `raw_json` keys
-  `Year, Month, EFPG_name, EFPG_code, Metroregion_name, Metroregion_code,
-  Purchase_dollars_wtd, Purchase_grams_wtd` (price ≈ dollars / grams). The supplemental file
-  adds a few extra index columns; the core columns above are shared by both files.
-
-**Deliverables:** staging models (one per source, typed/cleaned), analytics models incl. the
-nutrition-per-dollar join, dbt tests (not_null/unique/relationships) + `dbt docs`. Build one
-phase at a time — do not start Phase 4 in the same session.
+**What Phase 4 will wrap:** `dbt build` executed from `transform/` with the service-account
+profile (`transform/profiles.example.yml` → real `profiles.yml`). Keep everything on the free
+tier / Sandbox (batch + query jobs only; no streaming). The forecast/dashboard remain Phase 5.

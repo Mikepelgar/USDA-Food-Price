@@ -1,0 +1,72 @@
+version: 2
+
+models:
+  - name: stg_nutrition
+    description: "Cleaned FDC foods (one row per fdc_id). food_category standardized; foodNutrients kept as JSON (per 100 g)."
+    columns:
+      - name: fdc_id
+        description: "FoodData Central food id."
+        tests: [unique, not_null]
+      - name: data_type
+        description: "FDC dataset: Branded / Survey (FNDDS) / SR Legacy / Foundation / Experimental."
+      - name: food_category
+        description: "Standardized FDC foodCategory (lower/trim); NULL for 'no category' sentinels."
+      - name: food_nutrients
+        description: "foodNutrients array as a JSON string; exploded in dim_nutrition."
+
+  - name: stg_prices_bls
+    description: "Cleaned BLS APU monthly retail prices; one row per (series_id, month_date). Monthly periods only."
+    columns:
+      - name: series_id
+        description: "BLS APU series id."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('bls_series_items')
+              field: series_id
+      - name: month_date
+        description: "First-of-month date from year + period."
+        tests: [not_null]
+      - name: price_usd
+        description: "Monthly U.S. city-average retail price (USD), cast from the API string."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [series_id, month_date]
+
+  - name: stg_prices_fmap
+    description: "Cleaned ERS F-MAP MAIN workbook (2012-2018): mean unit value (USD/100 g) + GEKS index by category/region/month."
+    columns:
+      - name: efpg_code
+        description: "F-MAP EFPG category code."
+        tests: [not_null]
+      - name: region_code
+        description: "F-MAP Metroregion code."
+        tests: [not_null]
+      - name: month_date
+        description: "First-of-month date."
+        tests: [not_null]
+      - name: mean_unit_value
+        description: "Weighted mean unit value, USD per 100 g."
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [efpg_code, region_code, month_date]
+
+  - name: stg_fmap_price_index
+    description: "Cleaned ERS F-MAP SUPPLEMENTAL workbook (2016-2018): alternative price-index methods (Laspeyres/Paasche/Tornqvist/Fisher/GEKS/CCD)."
+    columns:
+      - name: efpg_code
+        description: "F-MAP EFPG category code."
+        tests: [not_null]
+      - name: month_date
+        description: "First-of-month date."
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [efpg_code, region_code, month_date]

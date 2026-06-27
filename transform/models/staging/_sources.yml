@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: usda_raw
+    description: >
+      Raw tables loaded verbatim by the Phase-2 BigQuery loader
+      (src/usda_food_price_pipeline/load/bigquery_loader.py). No cleaning, casting, or joining
+      was done at load time — all of that happens in these dbt staging models.
+    database: usda-food-prices      # BigQuery project
+    schema: usda_raw                # BigQuery dataset
+    tables:
+      - name: raw_nutrition
+        description: "One row per FDC food. Full food object in raw_json (nutrient values are per 100 g)."
+      - name: raw_prices_bls
+        description: "BLS APU observations, one row per (series_id, period). Values are API strings."
+      - name: raw_prices_fmap
+        description: "ERS F-MAP workbook rows; one {header:cell} JSON record per worksheet row, all sheets."

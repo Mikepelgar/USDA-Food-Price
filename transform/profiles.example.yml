@@ -1,0 +1,26 @@
+# -----------------------------------------------------------------------------
+# dbt connection profile — TEMPLATE. Copy this to a real (gitignored) profiles.yml:
+#   * easiest: transform/profiles.yml, then run dbt FROM transform/ with --profiles-dir .
+#   * or:      ~/.dbt/profiles.yml (dbt's default location, naturally outside the repo)
+# profiles.yml stores only a PATH to the service-account key — never the key itself.
+# -----------------------------------------------------------------------------
+usda_food_prices:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: usda-food-prices
+      # Default target dataset. Staging models override this to usda_staging
+      # (see dbt_project.yml + macros/generate_schema_name.sql).
+      dataset: usda_analytics
+      location: US
+      threads: 4
+      # Path to the SAME service-account JSON Phase 2 used (GOOGLE_APPLICATION_CREDENTIALS).
+      # Relative paths resolve from dbt's working directory, so this works when you run
+      # dbt FROM the transform/ folder. If you instead keep profiles.yml in ~/.dbt/, use an
+      # ABSOLUTE path here, e.g. (Windows, forward slashes):
+      #   C:/Users/<you>/usda-food-price-pipeline/secrets/gcp-service-account.json
+      keyfile: ../secrets/gcp-service-account.json
+      job_execution_timeout_seconds: 300
+      job_retries: 1
