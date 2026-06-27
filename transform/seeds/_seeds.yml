@@ -1,0 +1,36 @@
+version: 2
+
+seeds:
+  - name: category_crosswalk
+    description: >
+      Curated, intentionally-lossy bridge from F-MAP price categories (EFPG code) to the broad
+      FDC foodCategory that dim_nutrition is keyed on. FDC categories are broad (e.g. 'dairy and
+      egg products') while F-MAP is granular (e.g. 'whole milk'), so several priced categories may
+      map to one nutrition profile. Only the food-basket overlap is mapped; unmapped EFPGs simply
+      drop out of fct_nutrition_per_dollar. Every target is a non-Branded category that exists in
+      dim_nutrition.
+    columns:
+      - name: fmap_efpg_code
+        description: "F-MAP EFPG integer code — unique join key to fct_fmap_prices.efpg_code."
+        tests: [unique, not_null]
+      - name: fmap_efpg_name
+        description: "Cleaned F-MAP category name (informational; the join uses the code)."
+      - name: fdc_food_category
+        description: "Target FDC food_category; must exist in dim_nutrition (non-Branded)."
+        tests: [not_null]
+      - name: notes
+        description: "Mapping caveats (thin sample, broad profile, etc.)."
+
+  - name: bls_series_items
+    description: >
+      BLS APU series_id -> human item label + unit. Mirrors DEFAULT_SERIES in
+      src/usda_food_price_pipeline/ingestion/prices_bls.py (the corrected basket — white
+      potatoes APU0000712112, not the old coffee code).
+    columns:
+      - name: series_id
+        description: "BLS APU series id."
+        tests: [unique, not_null]
+      - name: item_label
+        description: "Human-readable food item."
+      - name: unit
+        description: "Pricing unit (per lb / per doz / per gal)."

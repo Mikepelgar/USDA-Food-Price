@@ -1,0 +1,144 @@
+version: 2
+
+models:
+  - name: fct_fmap_prices
+    description: >
+      Clean monthly ERS F-MAP food price by category x region (2012-2018). One row per
+      (efpg_code, region_code, month_date). Price = weighted mean unit value (USD per 100 g);
+      price_index_geks is present for all years; the supplemental workbook's alternative index
+      methods are joined on for 2016-2018 (NULL otherwise).
+    columns:
+      - name: efpg_code
+        description: "F-MAP EFPG category code."
+        tests: [not_null]
+      - name: efpg_name
+        description: "Standardized EFPG category name (lower/trim)."
+      - name: region_code
+        description: "F-MAP Metroregion code (0=National, 1-4=census regions, else CBSA metro)."
+        tests: [not_null]
+      - name: region_name
+        description: "Standardized region name."
+      - name: month_date
+        description: "First-of-month date."
+        tests: [not_null]
+      - name: mean_unit_value
+        description: "Weighted mean unit value — the price, in USD per 100 g."
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: unit_value_check
+        description: "Cross-check: 100 * purchase_dollars_wtd / purchase_grams_wtd (~ mean_unit_value)."
+      - name: price_index_geks
+        description: "GEKS price index from the main workbook (all years)."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [efpg_code, region_code, month_date]
+
+  - name: fct_bls_prices
+    description: >
+      Clean current monthly BLS retail price series by item — the live, forecastable feed Phase 5
+      consumes. One row per (series_id, month_date).
+    columns:
+      - name: series_id
+        description: "BLS APU series id."
+        tests: [not_null]
+      - name: item_label
+        description: "Human-readable food item (from the bls_series_items seed)."
+      - name: unit
+        description: "Pricing unit (per lb / per doz / per gal)."
+      - name: month_date
+        description: "First-of-month date."
+        tests: [not_null]
+      - name: price_usd
+        description: "Monthly U.S. city-average retail price (USD)."
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: is_latest
+        description: "BLS 'latest' flag for the observation."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [series_id, month_date]
+
+  - name: dim_nutrition
+    description: >
+      Nutrition profile per FDC food_category, per 100 g, taken as the MEDIAN across non-Branded
+      foods (Foundation / SR Legacy / Survey). Keyed by food_category. Feeds fct_nutrition_per_dollar.
+    columns:
+      - name: food_category
+        description: "FDC food category (cleaned, lower/trim)."
+        tests: [unique, not_null]
+      - name: n_foods
+        description: "Number of foods aggregated into the category."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 1
+      - name: protein_g_per_100g
+        description: "Median protein (g) per 100 g."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: energy_kcal_per_100g
+        description: "Median food energy (kcal) per 100 g."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1000
+      - name: total_fat_g_per_100g
+        description: "Median total fat (g) per 100 g."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: carbs_g_per_100g
+        description: "Median carbohydrate (g) per 100 g."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: fiber_g_per_100g
+        description: "Median dietary fiber (g) per 100 g."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+
+  - name: fct_nutrition_per_dollar
+    description: >
+      Combined model: F-MAP price (USD/100 g) joined via category_crosswalk to dim_nutrition,
+      yielding nutrients per dollar by category x region x month, ranked by protein per dollar
+      within each (region, month). CAVEAT: uses HISTORICAL F-MAP prices (2012-2018) with static
+      nutrition — NOT current prices (fct_bls_prices is the current/forecastable feed). The
+      crosswalk is intentionally lossy; several priced categories share one broad FDC nutrition
+      profile. One row per (efpg_code, region_code, month_date).
+    columns:
+      - name: efpg_code
+        description: "F-MAP EFPG category code."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('category_crosswalk')
+              field: fmap_efpg_code
+      - name: region_code
+        description: "F-MAP Metroregion code."
+        tests: [not_null]
+      - name: month_date
+        description: "First-of-month date."
+        tests: [not_null]
+      - name: fdc_food_category
+        description: "FDC nutrition category joined via the crosswalk."
+      - name: mean_unit_value
+        description: "F-MAP price, USD per 100 g."
+      - name: protein_g_per_dollar
+        description: "Grams of protein per dollar (protein_g_per_100g / mean_unit_value)."
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: protein_rank
+        description: "Rank of the category by protein-per-dollar within (region_code, month_date); 1 = best."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [efpg_code, region_code, month_date]
