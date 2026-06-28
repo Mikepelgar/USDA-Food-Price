@@ -408,7 +408,7 @@ with tab_npd:
                 .sort_values("amount_per_dollar", ascending=False)
                 .head(top_n)
             )
-            axis_title = f"{nutrient_label}"
+            axis_title = nutrient_label
             st.markdown(f"**{nutrient_label}** — {region}, {pick}")
             if snap.empty:
                 st.info("No data for that month/region.")

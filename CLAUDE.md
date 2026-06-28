@@ -4,373 +4,144 @@ Guidance for Claude Code (and humans) working in this repository.
 
 ## Project goal
 
-An automated data pipeline that pulls US food **price** (USDA ERS via api.data.gov) and
-**nutrition** (USDA FoodData Central) data from public USDA APIs and loads it into a cloud
-data warehouse. The warehouse data is transformed into analytics-ready tables that power a
-**dashboard** and a **food-price forecast**.
+An automated, free-tier data pipeline that pulls US food **price** (USDA ERS F-MAP + BLS) and
+**nutrition** (USDA FoodData Central) data from public APIs/files, loads it into a cloud data
+warehouse (BigQuery), transforms it into analytics-ready tables (dbt), orchestrates the flow
+(Airflow), and serves a **dashboard** + a **food-price forecast**. **Status: complete — all phases
+(0–6) are built, run, tested, and merged to `main`.**
 
-## Planned architecture & tech stack
+## Architecture & tech stack
 
 ```
-USDA APIs            Ingestion          Warehouse         Transform         Serve
-─────────            ─────────          ─────────         ─────────         ─────
-FoodData Central ─┐
-(nutrition)       ├─► Python scripts ─► raw tables ────► cleaned/ ───────► Dashboard
-ERS via           │   (requests)        (BigQuery)       modeled tables    + Price forecast
-api.data.gov ─────┘                                      (SQL)
+SOURCES                 INGESTION          WAREHOUSE           TRANSFORM            SERVE
+───────                 ─────────          ─────────           ─────────            ─────
+FoodData Central API ─┐  nutrition_fdc ─┐                      dbt staging views    Streamlit
+(nutrition, JSON)     │  prices_fmap    ─┼─► data/raw/* ─load─► usda_raw ──dbt──► usda_analytics ─┬─► dashboard
+ERS F-MAP file (.xlsx)├─ prices_bls     ─┘  (gitignored)       (raw tables)   (fct/dim tables)   │   (4 tabs)
+BLS APU API (JSON) ───┘                                                                           │
+                                                                       bls_forecast.py ──► usda_forecast ┘
+        ORCHESTRATION: Airflow (LocalExecutor) in Docker runs ingest→load→dbt build→dbt test daily.
 ```
 
-- **Language:** Python 3.11 (venv at `.venv/`).
-- **Ingestion:** `requests` for HTTP; `python-dotenv` for config; `pytest` for tests.
-  Only these three dependencies exist today — add more per phase, not preemptively.
-- **Warehouse:** Google Cloud **BigQuery** (permanent free tier; authenticated via the
-  service-account JSON referenced by `GOOGLE_APPLICATION_CREDENTIALS`).
-- **Transformation:** **dbt** on BigQuery.
-- **Orchestration:** **Apache Airflow**, run locally via **Docker** (Docker Compose).
-- **CI:** **GitHub Actions**.
-- **Serving:** **Streamlit** dashboard + a price forecast using **scikit-learn** (or a
-  simple statistical time-series model).
+- **Language:** Python 3.11 (venv at `.venv/`). **Ingestion:** `requests`, `python-dotenv`.
+- **Warehouse:** Google **BigQuery** (project `usda-food-prices`, location `US`), authenticated via
+  the service-account JSON at `secrets/gcp-service-account.json` (`GOOGLE_APPLICATION_CREDENTIALS`).
+- **Transform:** **dbt** (`dbt-bigquery` + `dbt_utils`). **Orchestration:** **Apache Airflow** via
+  **Docker Compose**. **Serving:** **Streamlit** dashboard + a **scikit-learn** forecast.
+- **CI:** **GitHub Actions** (`.github/workflows/ci.yml`). **Tests:** `pytest` (fully mocked) + dbt tests.
+- Full deps in `requirements.txt` (phase-scoped + commented); extra Airflow libs in `requirements-airflow.txt`.
 
-## Phase plan
+## What exists (by component)
 
-0. **Phase 0 — Scaffold (DONE):** repo structure, venv, env templates, git + GitHub.
-1. **Phase 1 — Ingestion → LOCAL FILES ONLY (DONE):** Python scripts pull nutrition
-   (FoodData Central API) and prices (ERS F-MAP file download + BLS API) and save raw output
-   to `data/raw/nutrition/`, `data/raw/prices/fmap/`, and `data/raw/prices/bls/`. `data/` is
-   gitignored. **No cloud, warehouse, orchestration, or dashboard code in this phase.**
-2. **Phase 2 — Load to BigQuery:** a loader reads the raw JSON files and loads them as-is
-   into raw/staging tables in BigQuery (idempotent re-runs). No transformation yet.
-3. **Phase 3 — Transformation (dbt on BigQuery):** staging + analytics models, including the
-   nutrition-per-dollar join; dbt tests and docs.
-4. **Phase 4 — Orchestration (Airflow + Docker):** one DAG runs ingest → load → `dbt build`
-   → `dbt test` on a daily schedule, with retries; containerized via Docker Compose.
-5. **Phase 5 — Dashboard + forecast (Streamlit + scikit-learn):** dashboard over the
-   analytics tables; next-month price forecast written back to BigQuery.
-6. **Phase 6 — Polish, CI, portfolio:** GitHub Actions CI, portfolio-quality README, repo
-   cleanup. **Also a feature goal:** expand the nutrition-per-dollar view from 3 nutrients to
-   **all macros + micronutrients** (see the Phase-6 section below).
+**Ingestion — `src/usda_food_price_pipeline/ingestion/`** (run as modules with `PYTHONPATH=src`;
+all writes go to gitignored `data/raw/`):
+- `common.py` — shared helpers (unit-tested): `raw_dir`, `utc_timestamp`, `slugify`, `make_session`,
+  `retry_request` (retries 429/5xx), `RateLimiter` (1000/hr), `save_json`, `load_environment`.
+- `nutrition_fdc.py` — FoodData Central `/foods/search`; paginates 15 common foods; one raw page per
+  file → `data/raw/nutrition/`. Needs `FDC_API_KEY`.
+- `prices_fmap.py` — ERS F-MAP **file download** (no API/key), 2012–2018 XLSX, saved as-is →
+  `data/raw/prices/fmap/`. `--from-file` offline fallback.
+- `prices_bls.py` — BLS Average Price API (NOT USDA); 8 curated `APU…` food series → `data/raw/prices/bls/`.
+  `BLS_API_KEY` optional (v2 vs v1).
 
-Build phases one at a time. Do not write code for a later phase until that phase is
-explicitly started — keep each session focused on its single phase.
+**Load — `src/.../load/bigquery_loader.py`:** reads the raw files and **batch-loads them as-is**
+(`WRITE_TRUNCATE`, idempotent, no streaming) into dataset **`usda_raw`** (created on first run):
+`raw_nutrition` (one row/food), `raw_prices_bls` (one row/observation), `raw_prices_fmap` (one
+row/worksheet-row, `.xlsx` via `openpyxl`). `--dry-run` parses without touching BigQuery; `--only` limits sources.
+
+**Transform — dbt project at `transform/`** (profile `usda_food_prices`; run from `transform/` with
+`--profiles-dir .`; real `profiles.yml` is gitignored, `profiles.example.yml` is the template; a
+`macros/generate_schema_name.sql` override makes custom schemas verbatim). **4 staging views** in
+`usda_staging` (typed/cleaned/de-duped) and **4 analytics tables** in `usda_analytics`:
+- `fct_fmap_prices` — monthly F-MAP price by category × region (2012–2018); grain (efpg_code, region_code, month_date).
+- `fct_bls_prices` — current monthly BLS price by item (the **forecast input**); grain (series_id, month_date).
+- `dim_nutrition` — **LONG**: median amount per 100 g for **every** reported nutrient across non-Branded
+  foods; grain **(food_category, nutrient_number, unit)**; carries `nutrient_name`, `unit`, `amount_per_100g`.
+- `fct_nutrition_per_dollar` — **per-nutrient**: F-MAP price ⋈ `category_crosswalk` ⋈ `dim_nutrition`;
+  `amount_per_dollar = amount_per_100g / mean_unit_value`; `nutrient_rank` per (region, month, nutrient);
+  grain **(efpg_code, region_code, month_date, nutrient_number, unit)**; `cluster_by` nutrient_number.
+  ~3.2M rows; ~214 nutrient×unit series reachable. CAVEAT: HISTORICAL prices + static nutrition.
+- Seeds: `category_crosswalk.csv` (F-MAP EFPG code → broad FDC `foodCategory`; intentionally lossy) and
+  `bls_series_items.csv`. **`dbt build` runs clean: 8 models, 2 seeds, 47 data tests — all PASS.**
+
+**Orchestration — Airflow + Docker (`docker-compose.yml`, `docker/airflow/`, `dags/`):** one DAG
+`usda_food_price_pipeline` (`@daily`, LocalExecutor, four containers: postgres + one-shot init +
+scheduler + webserver) runs six BashOperator tasks in a line:
+`ingest_nutrition → ingest_bls → ingest_fmap → load_bigquery → dbt_run → dbt_test`, with retries +
+timeouts. F-MAP `ingest_fmap` skips (exit 99) when the static file exists; ingest tasks `rm -f` their
+raw folder so each run loads one fresh snapshot. Secrets come from `.env`/mounted `secrets/`, never the
+DAG. **The image bakes the dbt project** (`COPY transform/` + `dbt deps` at build), so editing models
+needs `docker compose up -d --build`.
+
+**Serve — `dashboard/app.py` (Streamlit) + `src/.../forecast/bls_forecast.py`:** read-only over
+`usda_analytics`. The dashboard has 4 tabs (F-MAP trends, BLS inflation, **Nutrition-per-dollar with a
+nutrient dropdown** over all ~214 nutrients via per-nutrient cached queries, Forecast); BigQuery reads are
+`st.cache_data`-cached (1 hr). The forecast fits a per-series **AR(1) + month-seasonality** Ridge model,
+reports **MAPE of an expanding one-step backtest** vs a naive baseline (overall ≈ **2.8%** vs ≈ **2.1%**),
+and writes one row/series to **`usda_forecast.fct_bls_forecast`** (`WRITE_TRUNCATE` batch load).
+
+**CI — `.github/workflows/ci.yml`:** on push/PR, two credential-free jobs — `python-tests`
+(`pip install -r requirements.txt` → `pytest`, fully mocked) and `dbt-validate` (`dbt deps` + `dbt parse`
+against the committed dummy profile `.github/dbt/profiles.yml`, no warehouse connection). No secrets in CI.
 
 ## Conventions
 
-- **Secrets:**
-  - Real secrets live in `.env` (gitignored). `.env.example` is the committed template.
-  - The Google Cloud service-account JSON lives in `secrets/` (gitignored except
-    `.gitkeep`). Never commit credentials.
-  - Env vars in `.env` (all set as of 2026-06-20): `FDC_API_KEY` (nutrition API),
-    `BLS_API_KEY` (BLS price API; optional but set — raises the rate limit),
-    `GOOGLE_APPLICATION_CREDENTIALS` (BigQuery, used Phase 2+), and `ERS_API_KEY`
-    (validated but unused so far — kept for possible future ERS API use).
-  - `.env.example` documents `FDC_API_KEY`, `ERS_API_KEY`, `BLS_API_KEY` (added Phase 1),
-    and `GOOGLE_APPLICATION_CREDENTIALS`.
-- **Project layout (src layout):**
-  - `src/usda_food_price_pipeline/` — the importable Python package.
-  - `src/usda_food_price_pipeline/ingestion/` — ingestion scripts.
-  - `config/` — non-secret configuration. `tests/` — pytest tests. `docs/` — documentation.
-- **Naming:** package/module/function names are `snake_case`; directories `snake_case`.
-  Tests live in `tests/` as `test_*.py`. The distribution/repo name uses hyphens
-  (`usda-food-price-pipeline`); the importable package uses underscores
-  (`usda_food_price_pipeline`).
-- **Dependencies:** keep `requirements.txt` minimal and phase-scoped; document why each is
-  added.
-- **End-of-session update (REQUIRED):** at the end of **every** session, before wrapping up,
-  update this `CLAUDE.md` so it reflects what changed — keep "What exists" and especially
-  "Current state" / "Next" accurate (convert relative dates to absolute) — then **commit and
-  push it to `main`** so the copy on GitHub matches the local file. A docs-only update to
-  `CLAUDE.md` may be committed directly to `main` (no branch/PR needed); reserve the
-  branch + PR workflow for phase code. End the commit message with the
-  `Co-Authored-By: Claude …` trailer per the repo's git convention.
+- **Secrets:** real secrets in `.env` (gitignored); `.env.example` is the template. Service-account
+  JSON in `secrets/` (gitignored except `.gitkeep`). Verified via `git ls-files` that only `.env.example`
+  + `secrets/.gitkeep` are tracked — never commit credentials. Env vars: `FDC_API_KEY`, `BLS_API_KEY`
+  (optional), `GOOGLE_APPLICATION_CREDENTIALS`, `ERS_API_KEY` (validated, unused), and Phase-4 `AIRFLOW_*`.
+- **Layout (src layout):** `src/usda_food_price_pipeline/` (package: `ingestion/`, `load/`, `forecast/`);
+  `transform/` (dbt); `dashboard/`; `dags/`; `docker/`; `config/`; `tests/`; `docs/`.
+- **Naming:** `snake_case` modules/functions; tests in `tests/` as `test_*.py`; repo/distribution name
+  hyphenated (`usda-food-price-pipeline`), package underscored. Keep `requirements.txt` minimal + commented.
+- **Tests:** `python -m pytest` (41 tests, fully mocked — no network/keys; `pyproject.toml` sets
+  `pythonpath=["src"]`). dbt tests run inside `dbt build`.
+- **End-of-session update (REQUIRED):** at the end of **every** session, update this `CLAUDE.md` to reflect
+  what changed (keep "Current state" accurate; convert relative dates to absolute), then **commit and push
+  to `main`**. A docs-only `CLAUDE.md` update may go directly to `main`; reserve branch + PR for code. End
+  commit messages with the `Co-Authored-By: Claude …` trailer.
 
-## API reference (endpoints verified working in Phase 0)
+## API reference (verified working)
 
-These exact calls returned HTTP 200 with the project's real keys on 2026-06-20.
-
-- **USDA FoodData Central (nutrition)** — base `https://api.nal.usda.gov/fdc/v1`
-  - Verified: `GET /foods/search?query=<term>&pageSize=<n>&api_key=$FDC_API_KEY`
-  - Other documented endpoints: `/food/{fdcId}`, `/foods`, `/foods/list`.
-  - Docs: https://fdc.nal.usda.gov/api-guide.html
-Price data comes from TWO sources (decided 2026-06-20 — the ERS F-MAP dataset has no API):
-
-- **USDA ERS Food-at-Home Monthly Area Prices (F-MAP)** — **file download, NOT an API.**
-  Covers 2012–2018; 90 food categories × 15 geographic areas, monthly. In Phase 1, download
-  the raw data file(s) as-is and save to `data/raw/prices/fmap/`; do NOT parse them yet.
-  No API key needed.
-  - Page: https://www.ers.usda.gov/data-products/food-at-home-monthly-area-prices
-- **BLS average retail food prices** — **real JSON API** (current/ongoing monthly "APU"
-  Average Price Data series). This is the live, forecastable price feed. Optional free key
-  `BLS_API_KEY` raises the daily limit; add it to `.env`/`.env.example` in Phase 1. Save raw
-  responses to `data/raw/prices/bls/`. NOTE: BLS is not USDA.
-  - API docs: https://www.bls.gov/developers/ · register: https://data.bls.gov/registrationEngine/
-- **USDA ERS ARMS API** (validated, not currently a project source): base
-  `https://api.ers.usda.gov/data/arms` (`GET /year` → 200 in Phase 0). `ERS_API_KEY` is an
-  api.data.gov key kept for possible future ERS API use; F-MAP does not need it.
-- **BigQuery REST** — `https://bigquery.googleapis.com/bigquery/v2/projects/usda-food-prices/...`
-  - Auth: mint an OAuth token from `secrets/gcp-service-account.json` (scope
-    `https://www.googleapis.com/auth/bigquery`). A dry-run query job returned 200.
-- Both USDA keys are api.data.gov keys: rate-limited to 1,000 requests/hour (HTTP 429).
-
-## What exists
-
-**Phase 0 (scaffold) — COMPLETE (2026-06-20):** repo structure, venv, ingestion
-`requirements.txt`, env templates, `.gitignore`, README, this file. Pushed to GitHub:
-https://github.com/Mikepelgar/USDA-Food-Price (branch `main`; repo-local commit email
-`Mikepelgar@users.noreply.github.com`). All credentials verified to authenticate
-(2026-06-20): `FDC_API_KEY` (FDC 200 OK), `ERS_API_KEY` (ERS ARMS 200 OK), GCP
-service-account JSON at `secrets/gcp-service-account.json` (BigQuery token + dry-run 200 OK;
-project `usda-food-prices`).
-
-**Phase 1 (ingestion → local raw files) — COMPLETE.** All ingestion writes RAW responses to
-`data/raw/` only (gitignored); no cloud/warehouse code. Run scripts as modules with
-`PYTHONPATH=src` (e.g. `python -m usda_food_price_pipeline.ingestion.nutrition_fdc`).
-
-- **`src/usda_food_price_pipeline/ingestion/common.py`** — shared helpers (network-free
-  pieces are unit-tested): `raw_dir(*parts)` (creates/returns `data/raw/...`),
-  `utc_timestamp()`, `slugify()`, `make_session()`, `backoff_delay()`,
-  `retry_request(do_request, ...)` (retries 429/5xx + connection errors/timeouts, injectable
-  `sleep`), `RateLimiter` (sliding window; `USDA_RATE_LIMIT_PER_HOUR = 1000`), `save_json()`,
-  `load_environment()` (loads repo-root `.env`).
-- **`ingestion/nutrition_fdc.py`** — FoodData Central. Reads `FDC_API_KEY`. Paginates
-  `GET /foods/search` (base `https://api.nal.usda.gov/fdc/v1`) over `DEFAULT_QUERIES` (15
-  common foods), `DEFAULT_PAGE_SIZE=50`, `DEFAULT_MAX_PAGES=2` per query; rate-limited +
-  retried. The search payload already carries `description`, `foodCategory`, `foodNutrients`.
-  Saves **one raw page per file** to `data/raw/nutrition/` as
-  `fdc_search_<query-slug>_p<NN>_<timestamp>.json`. CLI: `--queries --page-size --max-pages`.
-- **`ingestion/prices_fmap.py`** — ERS F-MAP **file download (no API/key); not parsed.**
-  Default downloads the verified 2012–2018 XLSX + supplemental-indexes XLSX (URLs in
-  `FMAP_DOWNLOAD_URLS`, HEAD-checked 200, main file = 12,532,112 bytes = the manual
-  `~/Downloads/FMAP.xlsx`). Saves raw to `data/raw/prices/fmap/` as
-  `<timestamp>_<source-basename>.xlsx`. Offline fallback: `--from-file <path>` copies a local
-  file instead. CLI: `--from-file --url`.
-- **`ingestion/prices_bls.py`** — BLS Average Price API (NOT USDA). `BLS_API_KEY` optional:
-  present → v2 endpoint (`.../publicAPI/v2/timeseries/data/`), absent → v1. POSTs
-  `DEFAULT_SERIES` (8 curated `APU0000…` U.S. city-average food series — eggs, milk, bread,
-  flour, ground beef, chicken breast, bananas, white potatoes — titles verified against the
-  BLS catalog 2026-06-20) for the last 4 years; retried. Saves the raw response to
-  `data/raw/prices/bls/` as `bls_ap_<timestamp>.json`. CLI: `--series --start-year --end-year`.
-- **Tests:** `tests/test_common.py`, `test_nutrition_fdc.py`, `test_prices_fmap.py`,
-  `test_prices_bls.py` — 27 tests, all HTTP mocked (`unittest.mock`), no network/keys.
-  `pyproject.toml` sets `[tool.pytest.ini_options] pythonpath=["src"]`, so `python -m pytest`
-  works without installing the package. **No deps added** beyond `requests`/`python-dotenv`/
-  `pytest`. `.env.example` now includes `BLS_API_KEY`; `data/` is gitignored.
-
-**Phase 2 (load raw files → BigQuery) — COMPLETE and run (rows landed 2026-06-23).**
-Reads the Phase-1 raw files and **batch-loads them essentially as-is** (no cleaning, casting,
-or joining — that's Phase 3/dbt). Run as a module with `PYTHONPATH=src`. Added deps:
-`google-cloud-bigquery` + `openpyxl` (F-MAP is `.xlsx`; BigQuery can't load `.xlsx` directly).
-
-- **`src/usda_food_price_pipeline/load/bigquery_loader.py`** — the loader.
-  - **Dataset:** `usda_raw` in project `usda-food-prices` (location `US`); created on first
-    run if missing (`ensure_dataset`). Overridable via `--dataset`/`BIGQUERY_DATASET`,
-    `--location`/`BIGQUERY_LOCATION`, project via `BIGQUERY_PROJECT` (else inferred from the
-    service-account credentials). Auth via `GOOGLE_APPLICATION_CREDENTIALS`.
-  - **Three raw tables** (explicit schemas, autodetect off):
-    - `raw_nutrition` ← `data/raw/nutrition/*.json`: one row per food (the `foods` array);
-      cols `source_file, fdc_id, raw_json (full food verbatim), loaded_at`.
-    - `raw_prices_bls` ← `data/raw/prices/bls/*.json`: flattens `Results.series[].data[]`,
-      one row per observation; cols `source_file, series_id, year, period, period_name,
-      value, latest, footnotes (JSON str), loaded_at` (values kept as API strings).
-    - `raw_prices_fmap` ← `data/raw/prices/fmap/*.xlsx`: every sheet, header row → a
-      `{header: cell}` JSON record; cols `source_file, sheet_name, row_index, raw_json,
-      loaded_at`. Reads `.xlsx` with `openpyxl` (read-only, `data_only`).
-  - **Idempotency:** each table is loaded in a single batch load job with `WRITE_TRUNCATE`
-    (free; never streaming inserts), so re-running fully replaces the table — no duplicates.
-  - **Verification:** after loading, prints row counts per table via `get_table().num_rows`
-    (table metadata, not a billed query). `--dry-run` parses files + prints counts WITHOUT
-    touching BigQuery (handy to confirm parsing before any cloud call); `--only` limits sources.
-  - Pure row builders (`nutrition_rows_from_page`, `bls_rows_from_response`,
-    `fmap_rows_from_sheet`) are unit-tested with no network/BigQuery; the BigQuery client is
-    imported lazily. `tests/test_bigquery_loader.py` adds 8 tests (35 total, all pass).
-  - **Run + verified for real (2026-06-23):** the user ran the loader; it created dataset
-    `usda_raw` and landed `raw_nutrition` 1,500 (30 files × 50), `raw_prices_bls` 327
-    (1 file), `raw_prices_fmap` 162,262 (2 files, incl. both `ReadMe` + `Data` sheets) —
-    confirmed in the BigQuery console. Merged to `main` via PR #2.
-
-**Phase 3 (transformation — dbt on BigQuery) — COMPLETE 2026-06-27; `dbt build` ran clean
-(8 models, 2 seeds, 46 tests — all PASS) and the work is committed on a Phase-3 branch.** dbt project at
-**`transform/`** (profile `usda_food_prices`; `dbt-bigquery` added to `requirements.txt`,
-`dbt_utils` in `packages.yml`). Connects to BigQuery via `method: service-account` reusing
-`secrets/gcp-service-account.json`; the real `profiles.yml` is gitignored and
-`transform/profiles.example.yml` is the committed template (run dbt from `transform/` with
-`--profiles-dir .`). A `macros/generate_schema_name.sql` override makes custom schemas verbatim,
-so models land in datasets **`usda_staging`** (views) and **`usda_analytics`** (tables); dbt
-creates both on first run (Sandbox 60-day expiry applies).
-
-- **Source:** the three `usda_raw.*` tables (declared in `models/staging/_sources.yml`).
-- **Staging (views, 4)** — typed/cleaned/de-duped (`SAFE_CAST`; `LOWER`/`TRIM` + whitespace
-  collapse; deterministic `ROW_NUMBER` newest-wins on `loaded_at`):
-  - `stg_nutrition` — one row per `fdc_id`; standardized `food_category`; `foodNutrients` kept as JSON.
-  - `stg_prices_bls` — one row per (series_id, month); monthly only (`M01`–`M12`); `price_usd` numeric; item label via seed.
-  - `stg_prices_fmap` — F-MAP **main** workbook (2012–2018); `mean_unit_value` (USD/100 g, = ERS `Unit_value_mean_wtd`) + `price_index_geks`.
-  - `stg_fmap_price_index` — F-MAP **supplemental** workbook (2016–2018); alternative index methods only (Laspeyres/Paasche/Törnqvist/Fisher/GEKS/CCD).
-- **Analytics (tables, 4):**
-  - `fct_fmap_prices` — monthly price by category × region; main LEFT JOIN supplemental indexes; grain **(efpg_code, region_code, month_date)**.
-  - `fct_bls_prices` — current monthly price series by item (the **Phase-5 forecast input**); grain (series_id, month_date).
-  - `dim_nutrition` — nutrition per FDC `food_category` (per 100 g), **median** across non-Branded foods (Foundation/SR Legacy/Survey); grain (food_category).
-  - **`fct_nutrition_per_dollar`** — the combined model. Joins `fct_fmap_prices` → `category_crosswalk` (on `efpg_code`) → `dim_nutrition` (on `food_category`); computes `nutrient_g_per_100g / mean_unit_value` = grams per dollar; `protein_rank` window over (region, month). **Grain (efpg_code, region_code, month_date).** CAVEAT in its docs: HISTORICAL 2012–2018 prices + static nutrition (NOT current — `fct_bls_prices` is the current feed).
-- **Seeds:** `category_crosswalk.csv` (~20 rows; **F-MAP EFPG code → broad FDC `foodCategory`**;
-  intentionally lossy — FDC categories are broad while F-MAP is granular, so several priced
-  categories share one nutrition profile; only the food-basket overlap is mapped; every target is
-  a non-Branded category present in `dim_nutrition`) and `bls_series_items.csv` (8 series → label/unit,
-  mirrors `DEFAULT_SERIES`).
-- **Tests** (`_staging.yml`/`_analytics.yml`/`_seeds.yml`): not_null + unique on keys;
-  `dbt_utils.unique_combination_of_columns` on the F-MAP **(efpg_code, region_code, month_date)**
-  grain (also BLS + per-dollar grains); `dbt_utils.accepted_range(min_value:0)` on every
-  price/per-dollar column + plausible nutrient bounds; safe `relationships`
-  (`stg_prices_bls.series_id`→seed, `fct_nutrition_per_dollar.efpg_code`→crosswalk). Model +
-  column docs on all four analytics tables for `dbt docs`.
-- **Step 0 introspection (recorded):** F-MAP main `Data` sheet already carries the price
-  (`Unit_value_mean_wtd`) **and** `Price_index_GEKS` for all years (the supplemental file only
-  adds extra index methods, 2016–2018); 90 EFPG categories × 15 regions; nutrition data types
-  Branded 513 / Survey 502 / SR Legacy 442 / Foundation 34 / Experimental 9 (Branded+Experimental
-  excluded from nutrition); nutrientNumbers 203/204/205/208/291/301/303/307 confirmed present.
-
-**Phase 4 (orchestration — Airflow + Docker) — COMPLETE (built 2026-06-27; validated by a full
-green DAG run on 2026-06-28; merged to `main` via PR #4).** One **Apache Airflow** DAG runs
-the whole pipeline locally via **Docker Compose** (**LocalExecutor** — no Celery/Redis). Wraps +
-schedules the existing Phase 1–3 code; no ingestion/loader/dbt internals were changed.
-
-- **Stack (`docker-compose.yml`):** four services — `postgres` (metadata DB), one-shot
-  `airflow-init` (`airflow db migrate` + create admin user), `airflow-scheduler`,
-  `airflow-webserver` (UI on `localhost:8080`). `depends_on` + healthchecks gate scheduler/
-  webserver on Postgres (healthy) and init (completed). Admin login + `AIRFLOW_UID` come from
-  `.env` (`_AIRFLOW_WWW_USER_USERNAME`/`_PASSWORD`, added to `.env.example`).
-- **Image (`docker/airflow/Dockerfile`, `requirements-airflow.txt`):** `FROM
-  apache/airflow:2.10.5-python3.11`. Adds the ingestion/loader deps (`requests`,
-  `python-dotenv`, `google-cloud-bigquery`, `openpyxl`) to Airflow's env **using Airflow's
-  constraints file**; installs `dbt-bigquery` in an **isolated venv `/opt/dbt-venv`** (avoids
-  airflow↔dbt pin clashes); **bakes the dbt project** (`COPY transform/`) and runs **`dbt deps`
-  at build time** (so no run re-downloads `dbt_utils`). Trade-off: editing models needs
-  `docker compose up -d --build`. `.dockerignore` keeps `data/`, `secrets/`, dbt artifacts, and
-  the host `transform/profiles.yml` out of the image.
-- **DAG (`dags/usda_pipeline_dag.py`), id `usda_food_price_pipeline`:** `schedule="@daily"`,
-  `catchup=False`, static `start_date=datetime(2026,1,1)`, `max_active_runs=1`. Six thin
-  **BashOperator** tasks in a linear chain:
-  `ingest_nutrition >> ingest_bls >> ingest_fmap >> load_bigquery >> dbt_run >> dbt_test`
-  (each just runs the existing `python -m ...` / `dbt` command; cwd `/opt/airflow`,
-  `PYTHONPATH=/opt/airflow/src`). `dbt_run` = `dbt seed` + `dbt run`; `dbt_test` = `dbt test`
-  (split so a test failure is the explicit gate, not the build).
-- **Reliability:** `default_args` retries=2 with exponential backoff (`retry_delay` 2 min,
-  `max_retry_delay` 10 min); ingest tasks bumped to retries=3, dbt tasks retries=1; per-task
-  `execution_timeout`. `dbt_test` returning non-zero fails the task → the **run is marked
-  failed** (pipeline stops, not silently "successful").
-- **F-MAP skip:** static 2012–2018 file — `ingest_fmap` exits 99 (`skip_on_exit_code=99` →
-  UI "skipped") when `data/raw/prices/fmap/*.xlsx` exists; `load_bigquery` uses
-  `trigger_rule="none_failed"` so a skipped F-MAP doesn't skip the load.
-- **Daily-accumulation fix (in the DAG only):** `ingest_nutrition`/`ingest_bls` `rm -f` their
-  `data/raw/<source>` folder before re-ingesting, so each run loads exactly one fresh snapshot
-  (the loader globs all files + `WRITE_TRUNCATE`). **Phase-6 follow-up:** a loader
-  `--latest-only` flag would do this inside the loader instead.
-- **Secrets:** never in the DAG. `.env` → containers via `env_file`; `secrets/` mounted
-  read-only; compose overrides `GOOGLE_APPLICATION_CREDENTIALS` to the container path
-  `/opt/airflow/secrets/gcp-service-account.json`. dbt reuses it via a committed, secret-free
-  container profile `docker/airflow/dbt_profile/profiles.yml`
-  (`keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"`), leaving the host
-  `transform/profiles.yml` untouched.
-
-**Phase 5 (dashboard + forecast — Streamlit + scikit-learn) — COMPLETE (built + run for real
-2026-06-28).** Read-only serving layer over the `usda_analytics` tables; the pipeline, dbt
-models, and orchestration were NOT changed. Added deps to `requirements.txt`: `streamlit`,
-`pandas`, `db-dtypes` (lets BigQuery results → pandas), `scikit-learn` (Altair ships with
-Streamlit — no separate dep). 41 tests pass (6 new forecast tests).
-
-- **Forecast script — `src/usda_food_price_pipeline/forecast/bls_forecast.py`.** Run as a module
-  with `PYTHONPATH=src` (`python -m usda_food_price_pipeline.forecast.bls_forecast`; `--dry-run`
-  computes + prints accuracy without writing; `--holdout`/`--min-train` tunables). Reads
-  `usda_analytics.fct_bls_prices` (the current, forecastable feed — F-MAP ends 2018), and for
-  each of the 8 BLS series fits a **per-series AR(1) + month-seasonality** model: predict
-  price[t] from `[price[t-1], sin(month), cos(month)]` via scikit-learn `StandardScaler → Ridge`.
-  Anchoring on the last actual keeps volatile series (eggs) stable. **Accuracy = MAPE of an
-  expanding one-step-ahead backtest** over the last `--holdout` (default 6) months, printed
-  alongside a last-value naive baseline. **Result on the real data (2026-06-28): overall mean
-  MAPE ≈ 2.8%** (naive ≈ 2.1%; per-item ~0.3% chicken/bananas to ~8.6% eggs) — model beats naive
-  on bread + bananas, near-tie elsewhere; close-to-naive is expected for near random-walk prices
-  on ~48 points. Writes one next-month forecast row per series to **`usda_forecast.fct_bls_forecast`**
-  (a NEW, Python-owned dataset, kept separate from the dbt-managed `usda_analytics`), created on
-  first run, via a single **`WRITE_TRUNCATE` batch load** (idempotent; no streaming — Sandbox-safe).
-  Table cols: series_id, item_label, unit, forecast_month, forecast_price_usd, last_actual_month,
-  last_actual_price_usd, pct_change_vs_last, model, mape_backtest, naive_mape_backtest,
-  n_backtest_points, n_train_months, generated_at. Pure model functions (`_design`, `_fit`,
-  `_one_step`, `forecast_next`, `backtest_one_step`, `forecast_series`) are unit-tested with no
-  BigQuery; the BigQuery client + sklearn are imported lazily. Reuses the Phase-2 loader's
-  `ensure_dataset`.
-- **Dashboard — `dashboard/app.py`.** Run with `streamlit run dashboard/app.py` (port 8501; adds
-  `src/` to `sys.path` to reuse `common.load_environment`). BigQuery reads wrapped in
-  `st.cache_data(ttl=3600)` (client in `st.cache_resource`); the small analytics tables are read
-  whole once per hour and then **filtered in pandas**, so widget interactions never re-scan (REST
-  fetch, a few MB each — well under the 1 TB/mo Sandbox cap). Sidebar filters: **region** + **category**.
-  Four tabs, each captioned with its source + actual date range:
-  1. **F-MAP price trends** (`fct_fmap_prices`, historical 2012–2018, USD/100 g) — categories
-     within a region, and one category across regions (Altair line charts).
-  2. **BLS inflation** (`fct_bls_prices`, current monthly, U.S. city-average) — price + MoM%
-     lines, latest-MoM metric tiles, latest snapshot table (MoM + YoY%).
-  3. **Nutrition per dollar** (`fct_nutrition_per_dollar`, historical) — top-N ranked bar of
-     protein / energy / fiber per dollar by region × month.
-  4. **Forecast** (`usda_forecast.fct_bls_forecast` + `fct_bls_prices`) — headline mean MAPE +
-     naive baseline + per-item table, and an actuals-vs-forecast chart per item; shows a "run the
-     forecast script" hint if the table doesn't exist yet.
-  Uses the current Streamlit `width="stretch"` chart API. Validated end-to-end on 2026-06-28 via
-  Streamlit's headless `AppTest` against live BigQuery (no exceptions; all tabs/filters/metrics
-  populated).
+- **FoodData Central (nutrition)** — base `https://api.nal.usda.gov/fdc/v1`; used:
+  `GET /foods/search?query=<term>&pageSize=<n>&api_key=$FDC_API_KEY`. Docs: https://fdc.nal.usda.gov/api-guide.html
+- **USDA ERS F-MAP** — **file download, NOT an API** (2012–2018; 90 categories × 15 areas, monthly).
+  Page: https://www.ers.usda.gov/data-products/food-at-home-monthly-area-prices
+- **BLS Average Price (APU)** — JSON API (`.../publicAPI/v2/timeseries/data/` with key, else v1). The
+  live/forecastable feed. NOTE: **BLS is not USDA.** Docs: https://www.bls.gov/developers/
+- **BigQuery** — project `usda-food-prices`; OAuth token minted from the service-account JSON.
+- Both USDA keys are api.data.gov keys: 1,000 requests/hour (HTTP 429 when exceeded).
 
 ## Current state
 
-**Phases 0–5 are COMPLETE and merged to `main`** (Phase 3 via PR #3, Phase 4 via PR #4, Phase 5
-via PR #5). Phase 4 was run green on 2026-06-28 (Docker stack, one manual DAG run all success with
-F-MAP skipped, 46 dbt tests pass). **Phase 5 (Streamlit dashboard + scikit-learn forecast) was
-built AND run for real on 2026-06-28** in this session: the forecast script created dataset
-`usda_forecast` and wrote 8 rows to `usda_forecast.fct_bls_forecast` (overall backtest MAPE ≈
-2.8%), and the dashboard was validated end-to-end against live BigQuery via headless `AppTest`.
-BigQuery now holds: `usda_raw` (Phase-2 raw), `usda_staging`/`usda_analytics` (Phase-3 models),
-`usda_forecast` (Phase-5 forecast). **Phase 5 was merged to `main` via PR #5 (squash) on
-2026-06-28.** **Next: Phase 6 (CI via GitHub Actions + portfolio README + repo cleanup, plus the
-all-nutrients nutrition-per-dollar feature goal below).**
+**All phases (0–6) are COMPLETE and merged to `main`** (Phase 3 PR #3, Phase 4 PR #4, Phase 5 PR #5;
+Phase 6 via a `phase-6` PR). BigQuery holds: `usda_raw` (raw), `usda_staging`/`usda_analytics` (dbt
+models), `usda_forecast` (forecast). Phase 6 added: the **all-nutrients** nutrition-per-dollar feature
+(LONG `dim_nutrition`; per-nutrient `fct_nutrition_per_dollar`, new grains, ~214 nutrients, dbt tests
+47/47 PASS, dashboard nutrient dropdown — validated headless against live BigQuery), **GitHub Actions CI**,
+a portfolio README (with a **Results** section whose run-dependent metrics are left as fill-in
+placeholders), and a repo review (no tracked secrets, no stale refs).
 
-**Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
-check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
-`dbt-bigquery` (pulls in `dbt-core`); Phase 5 added `streamlit`, `pandas`, `db-dtypes`,
-`scikit-learn` — all in `requirements.txt`. Always `pip install -r requirements.txt` in the
-activated `.venv` first, then `dbt deps` (installs `dbt_utils`). Optional: installing
-`google-cloud-bigquery-storage` would silence the dashboard's REST-fallback warning, but it's
-unnecessary for these tiny tables.
+**Airflow-rebuild note:** the running DAG won't pick up the Phase-6 dbt model changes until the image is
+rebuilt (`docker compose up -d --build`) — the dbt project is baked into the image. Local `dbt build`
+already validated the new models; re-running the stack was out of scope for Phase 6.
 
-**Billing note (CONFIRMED 2026-06-23):** the user has **no billing account linked**, so the
-project runs in **BigQuery Sandbox = cannot be charged**. Caveat: Sandbox auto-expires every
-table ~60 days after creation (re-run ingestion + loader to recreate; raw files in
-`data/raw/` are the source of truth) and forbids streaming inserts (we only batch-load, so
-fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when exceeded).
+**Billing / Sandbox (CONFIRMED 2026-06-23):** no billing account linked → **BigQuery Sandbox** (cannot be
+charged). Caveat: Sandbox auto-expires tables ~60 days after creation (re-run ingestion + loader + dbt to
+recreate; `data/raw/` is the source of truth) and forbids streaming inserts (we only batch-load + query).
 
-## Next: Phase 6 — Polish, CI, portfolio
+**Data caveats (honest):** F-MAP prices are historical 2012–2018; BLS prices are current but U.S.
+city-average (no regional breakdown) and **BLS is not USDA**; the FDC↔F-MAP nutrition crosswalk is
+intentionally lossy (broad FDC categories vs granular F-MAP); the forecast is small-data (~48 points/series,
+near-random-walk → close to naive expected).
 
-Phase 5 is merged to `main` (PR #5). Start a **fresh session for
-Phase 6**: GitHub Actions **CI** (run `python -m pytest` on push/PR — the suite is fully mocked,
-no creds needed; optionally `dbt parse`/lint), a portfolio-quality **README** pass (screenshots of
-the dashboard, the architecture diagram, a short results write-up incl. the forecast MAPE), and
-**repo cleanup**. Keep everything on the free tier / Sandbox.
+**Known benign warning:** `dbt build`/`dbt parse` emit a `MissingArgumentsPropertyInGenericTestDeprecation`
+(dbt ≥1.10 wants `dbt_utils.accepted_range` args nested under `arguments:`). Pre-existing across all
+`accepted_range` tests; a non-blocking forward-compat warning, not an error — optional future cleanup.
 
-**Phase-6 feature goal — expand nutrition-per-dollar to every macro + micronutrient (added
-2026-06-28).** Today `fct_nutrition_per_dollar` + the dashboard surface only **3** nutrients
-(protein, energy, fiber) and `dim_nutrition` extracts **8**. **No new dataset is needed:** the
-ingested `usda_raw.raw_nutrition` (FDC `/foods/search` payload) already carries **221 distinct
-nutrients** (verified 2026-06-28 by unnesting `foodNutrients`) — macros + saturated/mono/poly fats,
-all major minerals, vitamins, folate forms, fatty-acid breakdowns. Coverage is ~1,400/1,500 foods
-for the big macros, ~900–1,200 for most vitamins/minerals, thinning out for trace nutrients (the
-`dim_nutrition` median just aggregates over whatever foods report each one).
-  - **Design:** pivot `dim_nutrition` from WIDE (one column per nutrient) to **LONG/tall** — one row
-    per `(food_category, nutrient)` with `nutrient_number, nutrient_name, unit, amount_per_100g`.
-    Then `fct_nutrition_per_dollar` → one row per `(efpg_code, region_code, month_date, nutrient)`
-    with `amount_per_dollar = amount_per_100g / mean_unit_value`. The dashboard's 3-way nutrient
-    radio becomes a **nutrient dropdown** (all 221 reachable, no UI bloat).
-  - **Touches:** `dim_nutrition.sql`, `fct_nutrition_per_dollar.sql`, their `_analytics.yml`
-    tests/docs (grain changes — add `nutrient` to the unique-combination test), and `dashboard/app.py`.
-  - **Caveats:** carry `unit` (G / MG / UG / KCAL) so "per dollar" is labelled correctly; the
-    F-MAP→FDC category crosswalk stays intentionally lossy, so more nutrients enrich the menu but
-    do NOT make the join more precise.
+## Possible future work (backlog, not started)
 
-**Phase-6 backlog (carried):**
-- Loader `--latest-only` flag so de-duping the nutrition/BLS snapshots happens inside the loader
-  instead of the DAG `rm -f` step (noted during Phase 4).
-- Optionally wire the Phase-5 forecast into the Airflow DAG as a final task (after `dbt_test`) so
-  `usda_forecast.fct_bls_forecast` refreshes daily with the rest of the pipeline.
-- Optionally add `google-cloud-bigquery-storage` to silence the dashboard's REST-fallback warning.
+- Loader `--latest-only` flag so snapshot de-duping happens in the loader instead of the DAG `rm -f` step.
+- Wire the forecast into the Airflow DAG as a final task so `usda_forecast` refreshes daily.
+- Add `google-cloud-bigquery-storage` to silence the dashboard's REST-fallback warning.
+- Migrate the `accepted_range` tests to the new `arguments:` syntax (clears the deprecation warning).
