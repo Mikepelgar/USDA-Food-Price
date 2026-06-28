@@ -64,56 +64,47 @@ models:
 
   - name: dim_nutrition
     description: >
-      Nutrition profile per FDC food_category, per 100 g, taken as the MEDIAN across non-Branded
-      foods (Foundation / SR Legacy / Survey). Keyed by food_category. Feeds fct_nutrition_per_dollar.
+      Nutrition profile per FDC food_category in LONG form: one row per
+      (food_category, nutrient_number, unit), the MEDIAN amount per 100 g across non-Branded foods
+      (Foundation / SR Legacy / Survey). All ~221 reported nutrients are surfaced (not just a curated
+      few). "unit" is part of the key, so energy appears as both KCAL and kJ. Feeds
+      fct_nutrition_per_dollar. NOTE: per-nutrient max bounds were intentionally dropped — a single
+      ceiling can't span g / mg / µg / kcal — so only a >= 0 sanity check remains.
     columns:
       - name: food_category
         description: "FDC food category (cleaned, lower/trim)."
-        tests: [unique, not_null]
+        tests: [not_null]
+      - name: nutrient_number
+        description: "FDC nutrient number (e.g. 203 = protein, 208 = energy)."
+        tests: [not_null]
+      - name: nutrient_name
+        description: "Human-readable nutrient name (e.g. Protein, Calcium, Energy)."
+      - name: unit
+        description: "Reported unit for the nutrient amount (G / MG / UG / KCAL / kJ / …)."
+        tests: [not_null]
       - name: n_foods
-        description: "Number of foods aggregated into the category."
+        description: "Number of foods aggregated into this (category, nutrient)."
         tests:
           - dbt_utils.accepted_range:
               min_value: 1
-      - name: protein_g_per_100g
-        description: "Median protein (g) per 100 g."
+      - name: amount_per_100g
+        description: "Median amount of the nutrient (in `unit`) per 100 g across the category's foods."
         tests:
+          - not_null
           - dbt_utils.accepted_range:
               min_value: 0
-              max_value: 100
-      - name: energy_kcal_per_100g
-        description: "Median food energy (kcal) per 100 g."
-        tests:
-          - dbt_utils.accepted_range:
-              min_value: 0
-              max_value: 1000
-      - name: total_fat_g_per_100g
-        description: "Median total fat (g) per 100 g."
-        tests:
-          - dbt_utils.accepted_range:
-              min_value: 0
-              max_value: 100
-      - name: carbs_g_per_100g
-        description: "Median carbohydrate (g) per 100 g."
-        tests:
-          - dbt_utils.accepted_range:
-              min_value: 0
-              max_value: 100
-      - name: fiber_g_per_100g
-        description: "Median dietary fiber (g) per 100 g."
-        tests:
-          - dbt_utils.accepted_range:
-              min_value: 0
-              max_value: 100
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [food_category, nutrient_number, unit]
 
   - name: fct_nutrition_per_dollar
     description: >
-      Combined model: F-MAP price (USD/100 g) joined via category_crosswalk to dim_nutrition,
-      yielding nutrients per dollar by category x region x month, ranked by protein per dollar
-      within each (region, month). CAVEAT: uses HISTORICAL F-MAP prices (2012-2018) with static
-      nutrition — NOT current prices (fct_bls_prices is the current/forecastable feed). The
+      Combined model: F-MAP price (USD/100 g) joined via category_crosswalk to the LONG
+      dim_nutrition, yielding EVERY nutrient per dollar by category x region x month, ranked per
+      nutrient within each (region, month). CAVEAT: uses HISTORICAL F-MAP prices (2012-2018) with
+      static nutrition — NOT current prices (fct_bls_prices is the current/forecastable feed). The
       crosswalk is intentionally lossy; several priced categories share one broad FDC nutrition
-      profile. One row per (efpg_code, region_code, month_date).
+      profile. One row per (efpg_code, region_code, month_date, nutrient_number, unit).
     columns:
       - name: efpg_code
         description: "F-MAP EFPG category code."
@@ -128,17 +119,27 @@ models:
       - name: month_date
         description: "First-of-month date."
         tests: [not_null]
+      - name: nutrient_number
+        description: "FDC nutrient number (joined from dim_nutrition)."
+        tests: [not_null]
+      - name: unit
+        description: "Reported unit for the nutrient amount (G / MG / UG / KCAL / kJ / …)."
+        tests: [not_null]
+      - name: nutrient_name
+        description: "Human-readable nutrient name."
       - name: fdc_food_category
         description: "FDC nutrition category joined via the crosswalk."
       - name: mean_unit_value
         description: "F-MAP price, USD per 100 g."
-      - name: protein_g_per_dollar
-        description: "Grams of protein per dollar (protein_g_per_100g / mean_unit_value)."
+      - name: amount_per_100g
+        description: "Median amount of the nutrient (in `unit`) per 100 g for the joined category."
+      - name: amount_per_dollar
+        description: "Amount of the nutrient (in `unit`) per dollar (amount_per_100g / mean_unit_value)."
         tests:
           - dbt_utils.accepted_range:
               min_value: 0
-      - name: protein_rank
-        description: "Rank of the category by protein-per-dollar within (region_code, month_date); 1 = best."
+      - name: nutrient_rank
+        description: "Rank of the category by this nutrient's amount-per-dollar within (region_code, month_date, nutrient_number, unit); 1 = best."
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [efpg_code, region_code, month_date]
+          combination_of_columns: [efpg_code, region_code, month_date, nutrient_number, unit]
