@@ -11,3 +11,9 @@ openpyxl               # reads the F-MAP .xlsx files (BigQuery cannot load .xlsx
 
 # --- Phase 3: transformation (dbt on BigQuery) ---
 dbt-bigquery>=1.7,<2.0  # dbt adapter for BigQuery (pulls in dbt-core); runs the SQL transforms. Then `dbt deps` for dbt_utils.
+
+# --- Phase 5: dashboard + forecast (Streamlit + scikit-learn) ---
+streamlit              # interactive dashboard over the usda_analytics tables (bundles altair for charts)
+pandas                 # dataframes for the dashboard + forecast
+db-dtypes              # lets BigQuery query results convert to pandas (DATE/NUMERIC dtypes)
+scikit-learn           # next-month BLS price forecast (Ridge: linear trend + month seasonality)
