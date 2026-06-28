@@ -47,7 +47,8 @@ api.data.gov ─────┘                                      (SQL)
 5. **Phase 5 — Dashboard + forecast (Streamlit + scikit-learn):** dashboard over the
    analytics tables; next-month price forecast written back to BigQuery.
 6. **Phase 6 — Polish, CI, portfolio:** GitHub Actions CI, portfolio-quality README, repo
-   cleanup.
+   cleanup. **Also a feature goal:** expand the nutrition-per-dollar view from 3 nutrients to
+   **all macros + micronutrients** (see the Phase-6 section below).
 
 Build phases one at a time. Do not write code for a later phase until that phase is
 explicitly started — keep each session focused on its single phase.
@@ -346,6 +347,25 @@ Phase 6**: GitHub Actions **CI** (run `python -m pytest` on push/PR — the suit
 no creds needed; optionally `dbt parse`/lint), a portfolio-quality **README** pass (screenshots of
 the dashboard, the architecture diagram, a short results write-up incl. the forecast MAPE), and
 **repo cleanup**. Keep everything on the free tier / Sandbox.
+
+**Phase-6 feature goal — expand nutrition-per-dollar to every macro + micronutrient (added
+2026-06-28).** Today `fct_nutrition_per_dollar` + the dashboard surface only **3** nutrients
+(protein, energy, fiber) and `dim_nutrition` extracts **8**. **No new dataset is needed:** the
+ingested `usda_raw.raw_nutrition` (FDC `/foods/search` payload) already carries **221 distinct
+nutrients** (verified 2026-06-28 by unnesting `foodNutrients`) — macros + saturated/mono/poly fats,
+all major minerals, vitamins, folate forms, fatty-acid breakdowns. Coverage is ~1,400/1,500 foods
+for the big macros, ~900–1,200 for most vitamins/minerals, thinning out for trace nutrients (the
+`dim_nutrition` median just aggregates over whatever foods report each one).
+  - **Design:** pivot `dim_nutrition` from WIDE (one column per nutrient) to **LONG/tall** — one row
+    per `(food_category, nutrient)` with `nutrient_number, nutrient_name, unit, amount_per_100g`.
+    Then `fct_nutrition_per_dollar` → one row per `(efpg_code, region_code, month_date, nutrient)`
+    with `amount_per_dollar = amount_per_100g / mean_unit_value`. The dashboard's 3-way nutrient
+    radio becomes a **nutrient dropdown** (all 221 reachable, no UI bloat).
+  - **Touches:** `dim_nutrition.sql`, `fct_nutrition_per_dollar.sql`, their `_analytics.yml`
+    tests/docs (grain changes — add `nutrient` to the unique-combination test), and `dashboard/app.py`.
+  - **Caveats:** carry `unit` (G / MG / UG / KCAL) so "per dollar" is labelled correctly; the
+    F-MAP→FDC category crosswalk stays intentionally lossy, so more nutrients enrich the menu but
+    do NOT make the join more precise.
 
 **Phase-6 backlog (carried):**
 - Loader `--latest-only` flag so de-duping the nutrition/BLS snapshots happens inside the loader
