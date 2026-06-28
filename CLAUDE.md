@@ -316,15 +316,16 @@ Streamlit — no separate dep). 41 tests pass (6 new forecast tests).
 
 ## Current state
 
-**Phases 0–5 are COMPLETE.** Phases 0–4 are merged to `main` (Phase 3 via PR #3, Phase 4 via
-PR #4). Phase 4 was run green on 2026-06-28 (Docker stack, one manual DAG run all success with
+**Phases 0–5 are COMPLETE and merged to `main`** (Phase 3 via PR #3, Phase 4 via PR #4, Phase 5
+via PR #5). Phase 4 was run green on 2026-06-28 (Docker stack, one manual DAG run all success with
 F-MAP skipped, 46 dbt tests pass). **Phase 5 (Streamlit dashboard + scikit-learn forecast) was
 built AND run for real on 2026-06-28** in this session: the forecast script created dataset
 `usda_forecast` and wrote 8 rows to `usda_forecast.fct_bls_forecast` (overall backtest MAPE ≈
 2.8%), and the dashboard was validated end-to-end against live BigQuery via headless `AppTest`.
 BigQuery now holds: `usda_raw` (Phase-2 raw), `usda_staging`/`usda_analytics` (Phase-3 models),
-`usda_forecast` (Phase-5 forecast). **As of 2026-06-28 Phase 5 is on a feature branch / PR — not
-yet merged to `main`.** **Next: Phase 6 (CI via GitHub Actions + portfolio README + repo cleanup).**
+`usda_forecast` (Phase-5 forecast). **Phase 5 was merged to `main` via PR #5 (squash) on
+2026-06-28.** **Next: Phase 6 (CI via GitHub Actions + portfolio README + repo cleanup, plus the
+all-nutrients nutrition-per-dollar feature goal below).**
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
 check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
@@ -342,7 +343,7 @@ fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when 
 
 ## Next: Phase 6 — Polish, CI, portfolio
 
-Phase 5 is built and run; merge its branch/PR to `main` after review. Start a **fresh session for
+Phase 5 is merged to `main` (PR #5). Start a **fresh session for
 Phase 6**: GitHub Actions **CI** (run `python -m pytest` on push/PR — the suite is fully mocked,
 no creds needed; optionally `dbt parse`/lint), a portfolio-quality **README** pass (screenshots of
 the dashboard, the architecture diagram, a short results write-up incl. the forecast MAPE), and
