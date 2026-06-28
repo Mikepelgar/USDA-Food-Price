@@ -226,7 +226,7 @@ creates both on first run (Sandbox 60-day expiry applies).
   excluded from nutrition); nutrientNumbers 203/204/205/208/291/301/303/307 confirmed present.
 
 **Phase 4 (orchestration — Airflow + Docker) — COMPLETE (built 2026-06-27; validated by a full
-green DAG run on 2026-06-28; on the Phase-4 branch / PR #4).** One **Apache Airflow** DAG runs
+green DAG run on 2026-06-28; merged to `main` via PR #4).** One **Apache Airflow** DAG runs
 the whole pipeline locally via **Docker Compose** (**LocalExecutor** — no Celery/Redis). Wraps +
 schedules the existing Phase 1–3 code; no ingestion/loader/dbt internals were changed.
 
@@ -270,16 +270,14 @@ schedules the existing Phase 1–3 code; no ingestion/loader/dbt internals were 
 
 ## Current state
 
-**Phases 0–4 are COMPLETE.** Phase 3 (dbt) was validated on 2026-06-27 (`dbt build`: 56 nodes,
-all 46 tests passed) and is merged to `main` (PR #3). Phase 4 (Airflow orchestration) was built
-2026-06-27 and lives on the **`phase-4-airflow-orchestration` branch / PR #4** — code + README +
-this CLAUDE.md update land together there; **`main` is NOT updated to "Phase 4 done" until that
-PR merges** (so `main` never claims Phase 4 while it's unmerged). **The stack was run for real on
-2026-06-28** (Docker Desktop + WSL2 installed): `docker compose up -d --build` brought up all four
-services healthy and one manual DAG run finished **green** — `ingest_nutrition`/`ingest_bls`/
-`load_bigquery`/`dbt_run`/`dbt_test` all success, `ingest_fmap` correctly **skipped**, 46 dbt tests
-pass. **Next: merge PR #4.** BigQuery `usda_raw` holds the Phase-2 raw tables;
-`usda_staging`/`usda_analytics` hold the Phase-3 models. No dashboard/forecast code exists yet.
+**Phases 0–4 are COMPLETE and merged to `main`.** Phase 3 (dbt) merged via PR #3; Phase 4
+(Airflow orchestration) built 2026-06-27 and **merged via PR #4** (squash). **The stack was run
+for real on 2026-06-28** (Docker Desktop + WSL2 installed): `docker compose up -d --build` brought
+up all four services healthy and one manual DAG run of `usda_food_price_pipeline` finished
+**green** — `ingest_nutrition`/`ingest_bls`/`load_bigquery`/`dbt_run`/`dbt_test` all success,
+`ingest_fmap` correctly **skipped**, 46 dbt tests pass. BigQuery `usda_raw` holds the Phase-2 raw
+tables; `usda_staging`/`usda_analytics` hold the Phase-3 models. No dashboard/forecast code exists
+yet. **Next: start Phase 5 (Streamlit dashboard + forecast) in a fresh session.**
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
 check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
