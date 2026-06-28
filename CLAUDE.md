@@ -47,7 +47,8 @@ api.data.gov ─────┘                                      (SQL)
 5. **Phase 5 — Dashboard + forecast (Streamlit + scikit-learn):** dashboard over the
    analytics tables; next-month price forecast written back to BigQuery.
 6. **Phase 6 — Polish, CI, portfolio:** GitHub Actions CI, portfolio-quality README, repo
-   cleanup.
+   cleanup. **Also a feature goal:** expand the nutrition-per-dollar view from 3 nutrients to
+   **all macros + micronutrients** (see the Phase-6 section below).
 
 Build phases one at a time. Do not write code for a later phase until that phase is
 explicitly started — keep each session focused on its single phase.
@@ -268,21 +269,71 @@ schedules the existing Phase 1–3 code; no ingestion/loader/dbt internals were 
   (`keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"`), leaving the host
   `transform/profiles.yml` untouched.
 
+**Phase 5 (dashboard + forecast — Streamlit + scikit-learn) — COMPLETE (built + run for real
+2026-06-28).** Read-only serving layer over the `usda_analytics` tables; the pipeline, dbt
+models, and orchestration were NOT changed. Added deps to `requirements.txt`: `streamlit`,
+`pandas`, `db-dtypes` (lets BigQuery results → pandas), `scikit-learn` (Altair ships with
+Streamlit — no separate dep). 41 tests pass (6 new forecast tests).
+
+- **Forecast script — `src/usda_food_price_pipeline/forecast/bls_forecast.py`.** Run as a module
+  with `PYTHONPATH=src` (`python -m usda_food_price_pipeline.forecast.bls_forecast`; `--dry-run`
+  computes + prints accuracy without writing; `--holdout`/`--min-train` tunables). Reads
+  `usda_analytics.fct_bls_prices` (the current, forecastable feed — F-MAP ends 2018), and for
+  each of the 8 BLS series fits a **per-series AR(1) + month-seasonality** model: predict
+  price[t] from `[price[t-1], sin(month), cos(month)]` via scikit-learn `StandardScaler → Ridge`.
+  Anchoring on the last actual keeps volatile series (eggs) stable. **Accuracy = MAPE of an
+  expanding one-step-ahead backtest** over the last `--holdout` (default 6) months, printed
+  alongside a last-value naive baseline. **Result on the real data (2026-06-28): overall mean
+  MAPE ≈ 2.8%** (naive ≈ 2.1%; per-item ~0.3% chicken/bananas to ~8.6% eggs) — model beats naive
+  on bread + bananas, near-tie elsewhere; close-to-naive is expected for near random-walk prices
+  on ~48 points. Writes one next-month forecast row per series to **`usda_forecast.fct_bls_forecast`**
+  (a NEW, Python-owned dataset, kept separate from the dbt-managed `usda_analytics`), created on
+  first run, via a single **`WRITE_TRUNCATE` batch load** (idempotent; no streaming — Sandbox-safe).
+  Table cols: series_id, item_label, unit, forecast_month, forecast_price_usd, last_actual_month,
+  last_actual_price_usd, pct_change_vs_last, model, mape_backtest, naive_mape_backtest,
+  n_backtest_points, n_train_months, generated_at. Pure model functions (`_design`, `_fit`,
+  `_one_step`, `forecast_next`, `backtest_one_step`, `forecast_series`) are unit-tested with no
+  BigQuery; the BigQuery client + sklearn are imported lazily. Reuses the Phase-2 loader's
+  `ensure_dataset`.
+- **Dashboard — `dashboard/app.py`.** Run with `streamlit run dashboard/app.py` (port 8501; adds
+  `src/` to `sys.path` to reuse `common.load_environment`). BigQuery reads wrapped in
+  `st.cache_data(ttl=3600)` (client in `st.cache_resource`); the small analytics tables are read
+  whole once per hour and then **filtered in pandas**, so widget interactions never re-scan (REST
+  fetch, a few MB each — well under the 1 TB/mo Sandbox cap). Sidebar filters: **region** + **category**.
+  Four tabs, each captioned with its source + actual date range:
+  1. **F-MAP price trends** (`fct_fmap_prices`, historical 2012–2018, USD/100 g) — categories
+     within a region, and one category across regions (Altair line charts).
+  2. **BLS inflation** (`fct_bls_prices`, current monthly, U.S. city-average) — price + MoM%
+     lines, latest-MoM metric tiles, latest snapshot table (MoM + YoY%).
+  3. **Nutrition per dollar** (`fct_nutrition_per_dollar`, historical) — top-N ranked bar of
+     protein / energy / fiber per dollar by region × month.
+  4. **Forecast** (`usda_forecast.fct_bls_forecast` + `fct_bls_prices`) — headline mean MAPE +
+     naive baseline + per-item table, and an actuals-vs-forecast chart per item; shows a "run the
+     forecast script" hint if the table doesn't exist yet.
+  Uses the current Streamlit `width="stretch"` chart API. Validated end-to-end on 2026-06-28 via
+  Streamlit's headless `AppTest` against live BigQuery (no exceptions; all tabs/filters/metrics
+  populated).
+
 ## Current state
 
-**Phases 0–4 are COMPLETE and merged to `main`.** Phase 3 (dbt) merged via PR #3; Phase 4
-(Airflow orchestration) built 2026-06-27 and **merged via PR #4** (squash). **The stack was run
-for real on 2026-06-28** (Docker Desktop + WSL2 installed): `docker compose up -d --build` brought
-up all four services healthy and one manual DAG run of `usda_food_price_pipeline` finished
-**green** — `ingest_nutrition`/`ingest_bls`/`load_bigquery`/`dbt_run`/`dbt_test` all success,
-`ingest_fmap` correctly **skipped**, 46 dbt tests pass. BigQuery `usda_raw` holds the Phase-2 raw
-tables; `usda_staging`/`usda_analytics` hold the Phase-3 models. No dashboard/forecast code exists
-yet. **Next: start Phase 5 (Streamlit dashboard + forecast) in a fresh session.**
+**Phases 0–5 are COMPLETE and merged to `main`** (Phase 3 via PR #3, Phase 4 via PR #4, Phase 5
+via PR #5). Phase 4 was run green on 2026-06-28 (Docker stack, one manual DAG run all success with
+F-MAP skipped, 46 dbt tests pass). **Phase 5 (Streamlit dashboard + scikit-learn forecast) was
+built AND run for real on 2026-06-28** in this session: the forecast script created dataset
+`usda_forecast` and wrote 8 rows to `usda_forecast.fct_bls_forecast` (overall backtest MAPE ≈
+2.8%), and the dashboard was validated end-to-end against live BigQuery via headless `AppTest`.
+BigQuery now holds: `usda_raw` (Phase-2 raw), `usda_staging`/`usda_analytics` (Phase-3 models),
+`usda_forecast` (Phase-5 forecast). **Phase 5 was merged to `main` via PR #5 (squash) on
+2026-06-28.** **Next: Phase 6 (CI via GitHub Actions + portfolio README + repo cleanup, plus the
+all-nutrients nutrition-per-dollar feature goal below).**
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
 check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
-`dbt-bigquery` (pulls in `dbt-core`) to `requirements.txt` — always `pip install -r
-requirements.txt` in the activated `.venv` first, then `dbt deps` (installs `dbt_utils`).
+`dbt-bigquery` (pulls in `dbt-core`); Phase 5 added `streamlit`, `pandas`, `db-dtypes`,
+`scikit-learn` — all in `requirements.txt`. Always `pip install -r requirements.txt` in the
+activated `.venv` first, then `dbt deps` (installs `dbt_utils`). Optional: installing
+`google-cloud-bigquery-storage` would silence the dashboard's REST-fallback warning, but it's
+unnecessary for these tiny tables.
 
 **Billing note (CONFIRMED 2026-06-23):** the user has **no billing account linked**, so the
 project runs in **BigQuery Sandbox = cannot be charged**. Caveat: Sandbox auto-expires every
@@ -290,15 +341,36 @@ table ~60 days after creation (re-run ingestion + loader to recreate; raw files 
 `data/raw/` are the source of truth) and forbids streaming inserts (we only batch-load, so
 fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when exceeded).
 
-## Next: Phase 5 — Dashboard + forecast (Streamlit + scikit-learn)
+## Next: Phase 6 — Polish, CI, portfolio
 
-Phase 4 is built and on its branch/PR (merge it after the user confirms a full DAG run is green).
-Start a **fresh session for Phase 5**: a **Streamlit** dashboard over the `usda_analytics` tables
-plus a next-month price forecast (scikit-learn or a simple statistical time-series model) written
-back to BigQuery. `fct_bls_prices` is the current/forecastable feed (grain series_id × month);
-`fct_nutrition_per_dollar` powers the nutrition-per-dollar view (historical 2012–2018 prices).
-Keep everything on the free tier / Sandbox (batch + query jobs only; no streaming). Do not write
-Phase 5 code until that phase is explicitly started.
+Phase 5 is merged to `main` (PR #5). Start a **fresh session for
+Phase 6**: GitHub Actions **CI** (run `python -m pytest` on push/PR — the suite is fully mocked,
+no creds needed; optionally `dbt parse`/lint), a portfolio-quality **README** pass (screenshots of
+the dashboard, the architecture diagram, a short results write-up incl. the forecast MAPE), and
+**repo cleanup**. Keep everything on the free tier / Sandbox.
 
-**Phase-6 backlog noted during Phase 4:** add a loader `--latest-only` flag so de-duping the
-nutrition/BLS snapshots happens inside the loader instead of the DAG `rm -f` step.
+**Phase-6 feature goal — expand nutrition-per-dollar to every macro + micronutrient (added
+2026-06-28).** Today `fct_nutrition_per_dollar` + the dashboard surface only **3** nutrients
+(protein, energy, fiber) and `dim_nutrition` extracts **8**. **No new dataset is needed:** the
+ingested `usda_raw.raw_nutrition` (FDC `/foods/search` payload) already carries **221 distinct
+nutrients** (verified 2026-06-28 by unnesting `foodNutrients`) — macros + saturated/mono/poly fats,
+all major minerals, vitamins, folate forms, fatty-acid breakdowns. Coverage is ~1,400/1,500 foods
+for the big macros, ~900–1,200 for most vitamins/minerals, thinning out for trace nutrients (the
+`dim_nutrition` median just aggregates over whatever foods report each one).
+  - **Design:** pivot `dim_nutrition` from WIDE (one column per nutrient) to **LONG/tall** — one row
+    per `(food_category, nutrient)` with `nutrient_number, nutrient_name, unit, amount_per_100g`.
+    Then `fct_nutrition_per_dollar` → one row per `(efpg_code, region_code, month_date, nutrient)`
+    with `amount_per_dollar = amount_per_100g / mean_unit_value`. The dashboard's 3-way nutrient
+    radio becomes a **nutrient dropdown** (all 221 reachable, no UI bloat).
+  - **Touches:** `dim_nutrition.sql`, `fct_nutrition_per_dollar.sql`, their `_analytics.yml`
+    tests/docs (grain changes — add `nutrient` to the unique-combination test), and `dashboard/app.py`.
+  - **Caveats:** carry `unit` (G / MG / UG / KCAL) so "per dollar" is labelled correctly; the
+    F-MAP→FDC category crosswalk stays intentionally lossy, so more nutrients enrich the menu but
+    do NOT make the join more precise.
+
+**Phase-6 backlog (carried):**
+- Loader `--latest-only` flag so de-duping the nutrition/BLS snapshots happens inside the loader
+  instead of the DAG `rm -f` step (noted during Phase 4).
+- Optionally wire the Phase-5 forecast into the Airflow DAG as a final task (after `dbt_test`) so
+  `usda_forecast.fct_bls_forecast` refreshes daily with the rest of the pipeline.
+- Optionally add `google-cloud-bigquery-storage` to silence the dashboard's REST-fallback warning.
