@@ -1,0 +1,12 @@
+# Extra Python deps baked into the Airflow image (docker/airflow/Dockerfile) so the
+# ingestion + loader tasks — run inside the containers as `python -m ...` — work.
+# Installed WITH Airflow's official constraints file for guaranteed compatibility with
+# the Airflow runtime (see the Dockerfile).
+#
+# These mirror the ingestion/loader deps from requirements.txt (Phases 1–2). dbt is
+# intentionally NOT here: it lives in an isolated venv (/opt/dbt-venv) so its pins can't
+# clash with Airflow's. See docker/airflow/Dockerfile.
+requests
+python-dotenv
+google-cloud-bigquery
+openpyxl

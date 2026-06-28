@@ -35,3 +35,8 @@ transform/target/
 transform/dbt_packages/
 transform/logs/
 transform/.user.yml
+
+# --- Phase 4: orchestration (Airflow in Docker) ---
+# Airflow/Postgres state lives in named Docker volumes, not the repo. Just ignore the
+# compiled DAGs. (docker-compose.yml, dags/, and docker/ are tracked.)
+dags/__pycache__/
