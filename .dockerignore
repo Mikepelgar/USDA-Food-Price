@@ -1,0 +1,34 @@
+# Keep the build context small and the image clean. The build only needs
+# requirements-airflow.txt and the dbt project (transform/); everything below is
+# either runtime-mounted, secret, or a build artifact.
+
+# Virtualenvs
+.venv/
+venv/
+
+# Raw data + secrets (mounted at runtime, never baked into the image)
+data/
+secrets/
+
+# dbt build artifacts + the host-only profile (we ship our own container profile)
+transform/target/
+transform/logs/
+transform/dbt_packages/
+transform/profiles.yml
+
+# Python caches / test artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Git + CI + editor cruft
+.git/
+.github/
+.vscode/
+.idea/
+.claude/
+
+# Local env file (never bake secrets into the image; mounted at runtime instead)
+.env
