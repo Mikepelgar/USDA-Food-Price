@@ -225,13 +225,59 @@ creates both on first run (Sandbox 60-day expiry applies).
   Branded 513 / Survey 502 / SR Legacy 442 / Foundation 34 / Experimental 9 (Branded+Experimental
   excluded from nutrition); nutrientNumbers 203/204/205/208/291/301/303/307 confirmed present.
 
+**Phase 4 (orchestration — Airflow + Docker) — COMPLETE (built 2026-06-27; validated by a full
+green DAG run on 2026-06-28; merged to `main` via PR #4).** One **Apache Airflow** DAG runs
+the whole pipeline locally via **Docker Compose** (**LocalExecutor** — no Celery/Redis). Wraps +
+schedules the existing Phase 1–3 code; no ingestion/loader/dbt internals were changed.
+
+- **Stack (`docker-compose.yml`):** four services — `postgres` (metadata DB), one-shot
+  `airflow-init` (`airflow db migrate` + create admin user), `airflow-scheduler`,
+  `airflow-webserver` (UI on `localhost:8080`). `depends_on` + healthchecks gate scheduler/
+  webserver on Postgres (healthy) and init (completed). Admin login + `AIRFLOW_UID` come from
+  `.env` (`_AIRFLOW_WWW_USER_USERNAME`/`_PASSWORD`, added to `.env.example`).
+- **Image (`docker/airflow/Dockerfile`, `requirements-airflow.txt`):** `FROM
+  apache/airflow:2.10.5-python3.11`. Adds the ingestion/loader deps (`requests`,
+  `python-dotenv`, `google-cloud-bigquery`, `openpyxl`) to Airflow's env **using Airflow's
+  constraints file**; installs `dbt-bigquery` in an **isolated venv `/opt/dbt-venv`** (avoids
+  airflow↔dbt pin clashes); **bakes the dbt project** (`COPY transform/`) and runs **`dbt deps`
+  at build time** (so no run re-downloads `dbt_utils`). Trade-off: editing models needs
+  `docker compose up -d --build`. `.dockerignore` keeps `data/`, `secrets/`, dbt artifacts, and
+  the host `transform/profiles.yml` out of the image.
+- **DAG (`dags/usda_pipeline_dag.py`), id `usda_food_price_pipeline`:** `schedule="@daily"`,
+  `catchup=False`, static `start_date=datetime(2026,1,1)`, `max_active_runs=1`. Six thin
+  **BashOperator** tasks in a linear chain:
+  `ingest_nutrition >> ingest_bls >> ingest_fmap >> load_bigquery >> dbt_run >> dbt_test`
+  (each just runs the existing `python -m ...` / `dbt` command; cwd `/opt/airflow`,
+  `PYTHONPATH=/opt/airflow/src`). `dbt_run` = `dbt seed` + `dbt run`; `dbt_test` = `dbt test`
+  (split so a test failure is the explicit gate, not the build).
+- **Reliability:** `default_args` retries=2 with exponential backoff (`retry_delay` 2 min,
+  `max_retry_delay` 10 min); ingest tasks bumped to retries=3, dbt tasks retries=1; per-task
+  `execution_timeout`. `dbt_test` returning non-zero fails the task → the **run is marked
+  failed** (pipeline stops, not silently "successful").
+- **F-MAP skip:** static 2012–2018 file — `ingest_fmap` exits 99 (`skip_on_exit_code=99` →
+  UI "skipped") when `data/raw/prices/fmap/*.xlsx` exists; `load_bigquery` uses
+  `trigger_rule="none_failed"` so a skipped F-MAP doesn't skip the load.
+- **Daily-accumulation fix (in the DAG only):** `ingest_nutrition`/`ingest_bls` `rm -f` their
+  `data/raw/<source>` folder before re-ingesting, so each run loads exactly one fresh snapshot
+  (the loader globs all files + `WRITE_TRUNCATE`). **Phase-6 follow-up:** a loader
+  `--latest-only` flag would do this inside the loader instead.
+- **Secrets:** never in the DAG. `.env` → containers via `env_file`; `secrets/` mounted
+  read-only; compose overrides `GOOGLE_APPLICATION_CREDENTIALS` to the container path
+  `/opt/airflow/secrets/gcp-service-account.json`. dbt reuses it via a committed, secret-free
+  container profile `docker/airflow/dbt_profile/profiles.yml`
+  (`keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"`), leaving the host
+  `transform/profiles.yml` untouched.
+
 ## Current state
 
-**Phases 0–3 are COMPLETE.** Phase 3 (dbt) was built, run, and validated on 2026-06-27:
-`dbt build` from `transform/` created datasets `usda_staging` (4 staging views) and
-`usda_analytics` (4 analytics tables + 2 seeds) and **all 46 tests passed** (56 nodes, 0 errors).
-The work is committed on a Phase-3 branch (push/PR pending). BigQuery `usda_raw` still holds the
-Phase-2 raw tables. No orchestration or dashboard code exists yet.
+**Phases 0–4 are COMPLETE and merged to `main`.** Phase 3 (dbt) merged via PR #3; Phase 4
+(Airflow orchestration) built 2026-06-27 and **merged via PR #4** (squash). **The stack was run
+for real on 2026-06-28** (Docker Desktop + WSL2 installed): `docker compose up -d --build` brought
+up all four services healthy and one manual DAG run of `usda_food_price_pipeline` finished
+**green** — `ingest_nutrition`/`ingest_bls`/`load_bigquery`/`dbt_run`/`dbt_test` all success,
+`ingest_fmap` correctly **skipped**, 46 dbt tests pass. BigQuery `usda_raw` holds the Phase-2 raw
+tables; `usda_staging`/`usda_analytics` hold the Phase-3 models. No dashboard/forecast code exists
+yet. **Next: start Phase 5 (Streamlit dashboard + forecast) in a fresh session.**
 
 **Venv note:** `google-auth` was installed into `.venv` ad hoc for the Phase-0 credential
 check (still not pinned). Phase 2 added `google-cloud-bigquery` + `openpyxl`; Phase 3 added
@@ -244,13 +290,15 @@ table ~60 days after creation (re-run ingestion + loader to recreate; raw files 
 `data/raw/` are the source of truth) and forbids streaming inserts (we only batch-load, so
 fine). USDA APIs are free, capped at 1,000 requests/hour per key (HTTP 429 when exceeded).
 
-## Next: Phase 4 — Orchestration (Airflow + Docker)
+## Next: Phase 5 — Dashboard + forecast (Streamlit + scikit-learn)
 
-Phase 3 is built, validated, and committed (Phase-3 branch; PR pending). Start a **fresh session
-for Phase 4**: one Airflow DAG (run locally via Docker Compose) that runs
-ingest → load → `dbt build` → `dbt test` on a daily schedule with retries. Do not write Phase 4
-code until that phase is explicitly started.
+Phase 4 is built and on its branch/PR (merge it after the user confirms a full DAG run is green).
+Start a **fresh session for Phase 5**: a **Streamlit** dashboard over the `usda_analytics` tables
+plus a next-month price forecast (scikit-learn or a simple statistical time-series model) written
+back to BigQuery. `fct_bls_prices` is the current/forecastable feed (grain series_id × month);
+`fct_nutrition_per_dollar` powers the nutrition-per-dollar view (historical 2012–2018 prices).
+Keep everything on the free tier / Sandbox (batch + query jobs only; no streaming). Do not write
+Phase 5 code until that phase is explicitly started.
 
-**What Phase 4 will wrap:** `dbt build` executed from `transform/` with the service-account
-profile (`transform/profiles.example.yml` → real `profiles.yml`). Keep everything on the free
-tier / Sandbox (batch + query jobs only; no streaming). The forecast/dashboard remain Phase 5.
+**Phase-6 backlog noted during Phase 4:** add a loader `--latest-only` flag so de-duping the
+nutrition/BLS snapshots happens inside the loader instead of the DAG `rm -f` step.

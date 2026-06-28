@@ -24,8 +24,9 @@ api.data.gov ─────┘                                      (SQL)
 3. **Transformation** — SQL transforms raw data into clean, modeled tables.
 4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
 
-> Status: Phases 1–3 are built — ingestion (→ local raw files), load (raw files → BigQuery),
-> and transformation (dbt models on BigQuery). Orchestration and dashboard code come in later phases.
+> Status: Phases 1–4 are built — ingestion (→ local raw files), load (raw files → BigQuery),
+> transformation (dbt models on BigQuery), and orchestration (Airflow in Docker runs the whole
+> pipeline daily). The dashboard + forecast come in Phase 5.
 
 ## Setup
 
@@ -186,6 +187,72 @@ dbt docs serve    --profiles-dir .
 > categories with no clean match are left out. `fct_nutrition_per_dollar` therefore uses
 > **historical** F-MAP prices (2012–2018) — `fct_bls_prices` is the current/forecastable feed.
 
+## Phase 4 — Orchestration (Airflow + Docker)
+
+Phases 1–3 are run by hand. Phase 4 automates them: one **Apache Airflow** DAG runs the whole
+pipeline — ingest → load → dbt — on a daily schedule with retries, all locally in **Docker**.
+
+### Airflow in 3 terms (beginner notes)
+
+- **DAG** ("Directed Acyclic Graph") — a recipe of tasks plus the arrows that order them (no
+  loops). Our DAG, `usda_food_price_pipeline`, has six tasks that run in a line:
+  `ingest_nutrition → ingest_bls → ingest_fmap → load_bigquery → dbt_run → dbt_test`.
+- **Scheduler** — the brain. It reads the DAG files, decides when a run is due (here `@daily`),
+  launches each task in order, and handles retries. With **LocalExecutor** the scheduler runs
+  the tasks itself, so there's no separate worker/Redis to manage.
+- **Webserver** — the UI at <http://localhost:8080>: see DAGs, trigger runs, watch task
+  status colors, and read each task's logs.
+
+The stack is four containers: **postgres** (Airflow's metadata DB), a one-shot **airflow-init**
+(migrates the DB + creates the admin user), the **scheduler**, and the **webserver**. They all
+share one custom image ([`docker/airflow/Dockerfile`](docker/airflow/Dockerfile)) that adds the
+ingestion/loader libraries to Airflow and bakes the dbt project in (with `dbt deps` run at build
+time, in an isolated venv so dbt's dependencies don't clash with Airflow's).
+
+### Secrets (never in the DAG)
+
+Nothing is hardcoded. `docker-compose.yml` feeds `.env` to the containers (`FDC_API_KEY`,
+`BLS_API_KEY`, …) and mounts `secrets/gcp-service-account.json` **read-only**; it overrides
+`GOOGLE_APPLICATION_CREDENTIALS` to that mounted path so both the loader and dbt authenticate
+to BigQuery from the same key file.
+
+### Start it, trigger it, watch it
+
+```bash
+# 1. Make sure .env is filled in (see .env.example — including the Phase-4 AIRFLOW_* vars)
+#    and secrets/gcp-service-account.json is present.
+
+# 2. Build the image and start the stack (first build downloads dbt_utils etc.):
+docker compose up -d --build
+
+# 3. Open the UI and log in (credentials from .env: _AIRFLOW_WWW_USER_USERNAME / _PASSWORD):
+#    http://localhost:8080
+
+# 4. Trigger a run manually — either un-pause the DAG and click ▶ (Trigger) in the UI, or:
+docker compose exec airflow-scheduler airflow dags trigger usda_food_price_pipeline
+
+# 5. Stop the stack when done (add -v to also delete the Airflow metadata DB volume):
+docker compose down
+```
+
+**Reading run status:** open the DAG → **Grid** (or **Graph**) view. Each square is a task run:
+**green** = success, **red** = failed, **pink** = skipped. `ingest_fmap` shows **skipped** on
+re-runs (the 2012–2018 file is static — it only downloads once). If a dbt test fails, `dbt_test`
+goes **red** and the whole run is marked failed, so the pipeline stops rather than reporting
+success. Click any task → **Logs** to see exactly what it printed.
+
+### Two behaviors worth knowing
+
+- **One fresh snapshot per run.** `ingest_nutrition` and `ingest_bls` write a *new* timestamped
+  file every run, and the loader globs *all* of a source's files with `WRITE_TRUNCATE`. So those
+  two tasks **clear their `data/raw/<source>` folder before re-ingesting** — each run loads
+  exactly one fresh snapshot instead of piling up duplicates (and `data/` doesn't grow
+  unbounded). _Phase-6 follow-up: a loader `--latest-only` flag would do this more cleanly inside
+  the loader; for now it's handled in the DAG wrapper so Phase-1/2 code stays untouched._
+- **Editing dbt models needs a rebuild.** The dbt project is baked into the image (so packages
+  install once, at build). After changing anything under `transform/`, re-run
+  `docker compose up -d --build` to pick it up.
+
 ## Repository Layout
 
 | Path                              | Purpose                                              |
@@ -194,9 +261,13 @@ dbt docs serve    --profiles-dir .
 | `src/.../ingestion/`              | Ingestion scripts that pull from the USDA APIs       |
 | `src/.../load/`                   | Phase-2 loader: raw files → BigQuery raw tables       |
 | `transform/`                      | Phase-3 dbt project: staging + analytics models, seeds, tests |
+| `dags/`                           | Phase-4 Airflow DAG (`usda_food_price_pipeline`)     |
+| `docker/airflow/`                 | Phase-4 Airflow image + container-only dbt profile   |
+| `docker-compose.yml`              | Phase-4 local Airflow stack (LocalExecutor)          |
 | `config/`                         | Non-secret configuration files                       |
 | `tests/`                          | Automated tests (pytest)                             |
 | `docs/`                           | Project documentation                                |
 | `secrets/`                        | Local-only credentials (gitignored)                  |
 | `.env.example` / `.env`           | Environment-variable template / your real values     |
-| `requirements.txt`                | Python dependencies                                  |
+| `requirements.txt`                | Python dependencies (ingestion/load/dbt)             |
+| `requirements-airflow.txt`        | Extra libs baked into the Airflow image              |

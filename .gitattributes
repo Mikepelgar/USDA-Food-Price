@@ -1,0 +1,11 @@
+# Container-bound files must use LF line endings so they behave correctly inside the
+# Linux Docker images, regardless of the host OS or git core.autocrlf. (Added in Phase 4.)
+Dockerfile         text eol=lf
+*.yml              text eol=lf
+*.yaml             text eol=lf
+*.sh               text eol=lf
+.dockerignore      text eol=lf
+.env.example       text eol=lf
+requirements*.txt  text eol=lf
+dags/*.py          text eol=lf
+docker/**          text eol=lf
