@@ -24,9 +24,39 @@ api.data.gov ─────┘                                      (SQL)
 3. **Transformation** — SQL transforms raw data into clean, modeled tables.
 4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
 
-> Status: Phases 1–4 are built — ingestion (→ local raw files), load (raw files → BigQuery),
-> transformation (dbt models on BigQuery), and orchestration (Airflow in Docker runs the whole
-> pipeline daily). The dashboard + forecast come in Phase 5.
+> Status: Phases 1–5 are built — ingestion (→ local raw files), load (raw files → BigQuery),
+> transformation (dbt models on BigQuery), orchestration (Airflow in Docker runs the whole
+> pipeline daily), and a Streamlit **dashboard + next-month price forecast** over the analytics
+> tables. Phase 6 (CI + portfolio polish) is next.
+
+## Architecture (full flow)
+
+```
+SOURCES                  INGESTION (Phase 1)        WAREHOUSE (Phase 2)     TRANSFORM (Phase 3)      SERVE (Phase 5)
+───────                  ──────────────────         ───────────────────     ───────────────────      ───────────────
+FoodData Central API ─┐  nutrition_fdc.py ─────┐                            dbt staging views        Streamlit dashboard
+(nutrition, JSON)     │                        │                            (usda_staging)           (dashboard/app.py)
+                      │                        ├─► data/raw/*  ──loader──►  raw tables       ──dbt──► analytics tables ──┐
+ERS F-MAP file        ├─ prices_fmap.py ───────┤   (gitignored)            (usda_raw)               (usda_analytics):   ├─► price trends,
+(historical .xlsx)    │                        │                                                     fct_fmap_prices,    │   inflation,
+                      │                        │                                                     fct_bls_prices,     │   nutrition/$,
+BLS APU API ──────────┘  prices_bls.py ────────┘                                                     dim_nutrition,      │   forecast view
+(current, JSON)                                                                                      fct_nutrition_per_$ ─┘
+                                                                                                            │
+                            ORCHESTRATION (Phase 4): Apache Airflow in Docker                              ▼  forecast (Phase 5)
+                            runs ingest → load → dbt build → dbt test daily.            bls_forecast.py ─► usda_forecast.fct_bls_forecast
+                                                                                        (scikit-learn, written back to BigQuery; read by the dashboard)
+```
+
+- **Sources → Ingestion.** Three Python scripts pull from the USDA FoodData Central API
+  (nutrition), the ERS F-MAP file download (historical 2012–2018 prices), and the BLS Average
+  Price API (current monthly prices), writing raw responses to `data/raw/` (gitignored).
+- **Warehouse.** A loader batch-loads those raw files as-is into `usda_raw` tables in BigQuery.
+- **Transform.** dbt turns the raw tables into typed, tested staging views (`usda_staging`) and
+  analytics tables (`usda_analytics`).
+- **Orchestrate.** One Airflow DAG (in Docker) runs ingest → load → `dbt build`/`dbt test` daily.
+- **Serve.** A Streamlit dashboard reads the analytics tables; a forecast script predicts next
+  month's BLS price per item and writes it back to `usda_forecast` for the dashboard to display.
 
 ## Setup
 
@@ -253,6 +283,44 @@ success. Click any task → **Logs** to see exactly what it printed.
   install once, at build). After changing anything under `transform/`, re-run
   `docker compose up -d --build` to pick it up.
 
+## Phase 5 — Dashboard + forecast (Streamlit + scikit-learn)
+
+A **Streamlit** dashboard reads the `usda_analytics` tables (kept fresh by the Phase-4
+pipeline) and a **forecast** script predicts next month's retail price for each BLS food item.
+Both are read-mostly serving code — they do **not** change the pipeline, dbt models, or
+orchestration. BigQuery reads in the dashboard are cached (`st.cache_data`, 1-hour TTL) so
+widget interactions filter in-memory frames instead of re-scanning BigQuery.
+
+```powershell
+pip install -r requirements.txt   # now includes streamlit, pandas, db-dtypes, scikit-learn
+
+# 1. Forecast next month's BLS price per item and write it back to BigQuery (idempotent).
+#    Reads usda_analytics.fct_bls_prices; writes usda_forecast.fct_bls_forecast (WRITE_TRUNCATE).
+$env:PYTHONPATH = "src"     # bash: export PYTHONPATH=src
+python -m usda_food_price_pipeline.forecast.bls_forecast
+#    options: --dry-run (compute + print accuracy, no write)  --holdout 6  --min-train 12
+
+# 2. Launch the dashboard (reads the analytics + forecast tables):
+streamlit run dashboard/app.py     # opens http://localhost:8501
+```
+
+**What the dashboard shows** (four tabs, each captioned with its source + date range):
+
+| View | Source | Notes |
+| ---- | ------ | ----- |
+| 📈 F-MAP price trends | `fct_fmap_prices` | price (USD/100 g) over time by category × region — **historical 2012–2018** |
+| 📊 BLS inflation | `fct_bls_prices` | **current** monthly retail prices + month-over-month inflation (U.S. city average, no region) |
+| 🥗 Nutrition per dollar | `fct_nutrition_per_dollar` | most protein / energy / fiber per dollar (historical F-MAP price × FDC nutrition) |
+| 🔮 Forecast | `fct_bls_forecast` + `fct_bls_prices` | next-month forecast vs. actuals, with the held-out accuracy metric |
+
+**The forecast model.** Each BLS series has only ~4 years of monthly history (~48 points), so the
+model is deliberately simple: a per-series **AR(1) + month-seasonality** regression (last month's
+price + sin/cos of the month, via scikit-learn `StandardScaler` → `Ridge`). Accuracy is the
+**MAPE of an expanding one-step-ahead backtest** over the most recent held-out months, reported
+next to a last-value naive baseline. On this small, near-random-walk data the overall MAPE is a
+few percent and close to naive — expected for a small-data portfolio forecast. The script writes
+one row per item to `usda_forecast.fct_bls_forecast` via a batch load (no streaming — Sandbox-safe).
+
 ## Repository Layout
 
 | Path                              | Purpose                                              |
@@ -260,7 +328,9 @@ success. Click any task → **Logs** to see exactly what it printed.
 | `src/usda_food_price_pipeline/`   | Python package (importable source code)              |
 | `src/.../ingestion/`              | Ingestion scripts that pull from the USDA APIs       |
 | `src/.../load/`                   | Phase-2 loader: raw files → BigQuery raw tables       |
+| `src/.../forecast/`               | Phase-5 forecast: BLS next-month price → BigQuery     |
 | `transform/`                      | Phase-3 dbt project: staging + analytics models, seeds, tests |
+| `dashboard/`                      | Phase-5 Streamlit dashboard (`app.py`)               |
 | `dags/`                           | Phase-4 Airflow DAG (`usda_food_price_pipeline`)     |
 | `docker/airflow/`                 | Phase-4 Airflow image + container-only dbt profile   |
 | `docker-compose.yml`              | Phase-4 local Airflow stack (LocalExecutor)          |
