@@ -1,0 +1,15 @@
+# Dummy, credential-free dbt profile used ONLY by CI (.github/workflows/ci.yml).
+# `dbt parse` validates/compiles the project's manifest without ever opening a warehouse
+# connection, so no real BigQuery credentials are needed (and none are committed).
+# The real connection profile is transform/profiles.yml (gitignored); see
+# transform/profiles.example.yml for the template.
+usda_food_prices:
+  target: ci
+  outputs:
+    ci:
+      type: bigquery
+      method: oauth
+      project: dummy
+      dataset: dummy
+      threads: 1
+      location: US

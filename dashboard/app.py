@@ -101,21 +101,36 @@ def load_bls_prices() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Loading nutrient menu…")
+def load_nutrition_menu() -> pd.DataFrame:
+    """Distinct (nutrient_number, nutrient_name, unit) for the nutrient dropdown — a tiny query
+    over the now-LONG, all-nutrients per-dollar table."""
+    project = get_client().project
+    return _query_df(
+        f"""
+        select distinct nutrient_number, nutrient_name, unit
+        from `{project}.{ANALYTICS_DATASET}.fct_nutrition_per_dollar`
+        order by nutrient_name
+        """
+    )
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Loading nutrition-per-dollar…")
-def load_nutrition_per_dollar() -> pd.DataFrame:
+def load_nutrition_per_dollar(nutrient_number: str, unit: str) -> pd.DataFrame:
+    """One nutrient's slice (all regions × months) — the per-dollar table is now LONG over ~221
+    nutrients, so we read just the selected nutrient. Cached per (nutrient_number, unit)."""
     project = get_client().project
     df = _query_df(
         f"""
         select efpg_code, efpg_name, region_code, region_name, month_date,
-               fdc_food_category, mean_unit_value,
-               protein_g_per_dollar, energy_kcal_per_dollar, fiber_g_per_dollar, protein_rank
+               fdc_food_category, nutrient_name, unit, mean_unit_value,
+               amount_per_100g, amount_per_dollar, nutrient_rank
         from `{project}.{ANALYTICS_DATASET}.fct_nutrition_per_dollar`
+        where nutrient_number = '{nutrient_number}' and unit = '{unit}'
         """
     )
     df["month_date"] = pd.to_datetime(df["month_date"])
-    return _to_floats(
-        df, ["mean_unit_value", "protein_g_per_dollar", "energy_kcal_per_dollar", "fiber_g_per_dollar"]
-    )
+    return _to_floats(df, ["mean_unit_value", "amount_per_100g", "amount_per_dollar"])
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Loading forecasts…")
@@ -170,7 +185,7 @@ st.caption(
 try:
     fmap = load_fmap_prices()
     bls = load_bls_prices()
-    npd = load_nutrition_per_dollar()
+    npd_menu = load_nutrition_menu()  # per-nutrient slices are loaded lazily inside the tab
     forecast = load_forecast()
 except Exception as exc:  # noqa: BLE001
     st.error(
@@ -349,63 +364,75 @@ with tab_bls:
 with tab_npd:
     st.subheader("Most nutrition per dollar")
     st.caption(
-        f"**Source:** F-MAP price (**historical, {_date_range_caption(npd)}**) joined to "
-        "FoodData Central nutrition (static) via a category crosswalk. Bars show grams (or "
-        "kcal) of nutrient **per dollar**. Note: the crosswalk is intentionally lossy, so "
-        "several priced categories share one broad nutrition profile."
+        "**Source:** F-MAP price (**historical**) joined to FoodData Central nutrition (static) "
+        "via a category crosswalk. Pick any of the ~221 reported nutrients; bars show the amount "
+        "**per dollar** in that nutrient's own unit. Note: the crosswalk is intentionally lossy, "
+        "so several priced categories share one broad nutrition profile."
     )
 
-    nutrient_label = st.radio(
-        "Nutrient",
-        ["Protein (g) / $", "Energy (kcal) / $", "Fiber (g) / $"],
-        horizontal=True,
-        key="npd_nutrient",
-    )
-    nutrient_col = {
-        "Protein (g) / $": "protein_g_per_dollar",
-        "Energy (kcal) / $": "energy_kcal_per_dollar",
-        "Fiber (g) / $": "fiber_g_per_dollar",
-    }[nutrient_label]
-
-    reg_npd = npd[npd["region_name"] == region]
-    if reg_npd.empty:
-        st.warning(f"No nutrition-per-dollar rows for region '{region}'.")
+    if npd_menu.empty:
+        st.warning("No nutrition-per-dollar data found. Has `dbt build` been run?")
     else:
-        months = sorted(reg_npd["month_date"].dropna().unique())
-        month_labels = [pd.Timestamp(m).strftime("%b %Y") for m in months]
-        pick = st.select_slider(
-            "Month", options=month_labels, value=month_labels[-1], key="npd_month"
+        # Nutrient dropdown over every (nutrient_name, unit) in the LONG table; default to protein.
+        menu = npd_menu.copy()
+        menu["label"] = menu["nutrient_name"].fillna(menu["nutrient_number"]) + " (" + menu["unit"] + ") / $"
+        menu = menu.sort_values("label").reset_index(drop=True)
+        default_idx = menu.index[
+            (menu["nutrient_number"] == "203") & (menu["unit"] == "G")
+        ].tolist()
+        nutrient_label = st.selectbox(
+            "Nutrient",
+            menu["label"].tolist(),
+            index=(default_idx[0] if default_idx else 0),
+            key="npd_nutrient",
         )
-        chosen_month = months[month_labels.index(pick)]
-        top_n = st.slider("Show top N categories", 5, 20, 10, key="npd_topn")
+        sel = menu[menu["label"] == nutrient_label].iloc[0]
+        unit = sel["unit"]
 
-        snap = (
-            reg_npd[reg_npd["month_date"] == chosen_month]
-            .dropna(subset=[nutrient_col])
-            .sort_values(nutrient_col, ascending=False)
-            .head(top_n)
-        )
-        st.markdown(f"**{nutrient_label}** — {region}, {pick}")
-        if snap.empty:
-            st.info("No data for that month/region.")
+        npd = load_nutrition_per_dollar(sel["nutrient_number"], unit)
+        reg_npd = npd[npd["region_name"] == region]
+        if reg_npd.empty:
+            st.warning(f"No nutrition-per-dollar rows for region '{region}'.")
         else:
-            bar = (
-                alt.Chart(snap)
-                .mark_bar()
-                .encode(
-                    x=alt.X(f"{nutrient_col}:Q", title=nutrient_label),
-                    y=alt.Y("efpg_name:N", title="Category", sort="-x"),
-                    color=alt.Color(f"{nutrient_col}:Q", legend=None, scale=alt.Scale(scheme="greens")),
-                    tooltip=[
-                        alt.Tooltip("efpg_name:N", title="Category"),
-                        alt.Tooltip("fdc_food_category:N", title="Nutrition profile"),
-                        alt.Tooltip("mean_unit_value:Q", title="Price USD/100g", format=".3f"),
-                        alt.Tooltip(f"{nutrient_col}:Q", title=nutrient_label, format=".2f"),
-                    ],
-                )
-                .properties(height=max(300, 28 * len(snap)))
+            months = sorted(reg_npd["month_date"].dropna().unique())
+            month_labels = [pd.Timestamp(m).strftime("%b %Y") for m in months]
+            pick = st.select_slider(
+                "Month", options=month_labels, value=month_labels[-1], key="npd_month"
             )
-            st.altair_chart(bar, width="stretch")
+            chosen_month = months[month_labels.index(pick)]
+            top_n = st.slider("Show top N categories", 5, 20, 10, key="npd_topn")
+
+            snap = (
+                reg_npd[reg_npd["month_date"] == chosen_month]
+                .dropna(subset=["amount_per_dollar"])
+                .sort_values("amount_per_dollar", ascending=False)
+                .head(top_n)
+            )
+            axis_title = nutrient_label
+            st.markdown(f"**{nutrient_label}** — {region}, {pick}")
+            if snap.empty:
+                st.info("No data for that month/region.")
+            else:
+                bar = (
+                    alt.Chart(snap)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("amount_per_dollar:Q", title=axis_title),
+                        y=alt.Y("efpg_name:N", title="Category", sort="-x"),
+                        color=alt.Color(
+                            "amount_per_dollar:Q", legend=None, scale=alt.Scale(scheme="greens")
+                        ),
+                        tooltip=[
+                            alt.Tooltip("efpg_name:N", title="Category"),
+                            alt.Tooltip("fdc_food_category:N", title="Nutrition profile"),
+                            alt.Tooltip("mean_unit_value:Q", title="Price USD/100g", format=".3f"),
+                            alt.Tooltip("amount_per_100g:Q", title=f"Amount/100g ({unit})", format=".2f"),
+                            alt.Tooltip("amount_per_dollar:Q", title=axis_title, format=".2f"),
+                        ],
+                    )
+                    .properties(height=max(300, 28 * len(snap)))
+                )
+                st.altair_chart(bar, width="stretch")
 
 # --------------------------------------------------------------------------- #
 # Tab 4 — Forecast vs actuals (next-month BLS price).

@@ -1,0 +1,46 @@
+name: CI
+
+# Lightweight, credential-free CI: runs the fully-mocked Python unit tests and validates the
+# dbt project without a warehouse connection. No cloud credentials or secrets are required.
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-tests:
+    name: Python unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        # The suite is fully mocked (no network, no cloud creds). pyproject.toml sets
+        # pythonpath=["src"], so the package imports without an install step.
+        run: python -m pytest -q
+
+  dbt-validate:
+    name: dbt validate (credential-free)
+    runs-on: ubuntu-latest
+    # Point dbt at the committed dummy profile; `dbt parse` never opens a connection.
+    env:
+      DBT_PROFILES_DIR: ${{ github.workspace }}/.github/dbt
+    defaults:
+      run:
+        working-directory: transform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dbt-bigquery
+        run: pip install "dbt-bigquery>=1.7,<2.0"
+      - name: dbt deps
+        run: dbt deps
+      - name: dbt parse (validate project without a warehouse connection)
+        run: dbt parse

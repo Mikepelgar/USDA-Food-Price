@@ -34,7 +34,8 @@ transform/profiles.yml
 transform/target/
 transform/dbt_packages/
 transform/logs/
-transform/.user.yml
+# dbt drops an anonymous-usage id file next to any profiles.yml it reads (incl. the CI one)
+.user.yml
 
 # --- Phase 4: orchestration (Airflow in Docker) ---
 # Airflow/Postgres state lives in named Docker volumes, not the repo. Just ignore the
