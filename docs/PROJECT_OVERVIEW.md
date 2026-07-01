@@ -164,15 +164,21 @@ category gives the most of it per dollar* in a given region and month. The forec
 
 ---
 
-## 6. Tech stack
+## 6. Tech stack & key libraries (by phase)
 
-| Layer | Tools |
-| ----- | ----- |
-| Language | Python 3.11 |
-| Ingestion | `requests`, `python-dotenv` |
-| Warehouse | Google BigQuery (Sandbox / free tier; batch + query jobs only) |
-| Transformation | dbt (`dbt-bigquery`) + `dbt_utils` |
-| Orchestration | Apache Airflow (LocalExecutor) on Docker Compose |
-| Serving | Streamlit + Altair |
-| Forecasting | scikit-learn (Ridge) |
-| CI / testing | GitHub Actions, `pytest`, dbt data tests |
+| Layer (phase) | Platform / tools | Notable Python libraries |
+| ------------- | ---------------- | ------------------------ |
+| Language & runtime | Python 3.11, `venv` | — |
+| Ingestion (P1) | USDA/BLS public APIs + file download | `requests` (HTTP client + retries), `python-dotenv` (load secrets from `.env`) |
+| Load (P2) | Google BigQuery batch loads | `google-cloud-bigquery` (client + `WRITE_TRUNCATE` batch jobs), **`openpyxl`** (parse the F-MAP `.xlsx` — BigQuery can't load Excel directly) |
+| Warehouse | Google BigQuery (Sandbox / free tier; batch + query jobs only) | — |
+| Transformation (P3) | dbt on BigQuery | `dbt-bigquery` (dbt-core + BigQuery adapter), **`dbt_utils`** (unique-combination / accepted-range tests) |
+| Orchestration (P4) | Apache Airflow (LocalExecutor) on Docker Compose | `apache-airflow` (BashOperator DAG); ingestion/loader libs re-installed in the image under Airflow's constraints |
+| Serving (P5) | Streamlit dashboard | `streamlit` (UI + caching), **`altair`** (charts), **`pandas`** (in-memory frames/filtering), **`db-dtypes`** (BigQuery NUMERIC/DATE → pandas) |
+| Forecasting (P5) | scikit-learn | `scikit-learn` (`Ridge`, `StandardScaler`, `make_pipeline`), **`numpy`** (seasonality features + MAPE) |
+| CI / testing (P6) | GitHub Actions | `pytest` (fully-mocked unit tests), dbt data tests, `dbt parse` (credential-free project validation) |
+
+Bolded libraries are the ones easy to overlook but genuinely load-bearing: `openpyxl` (the only way
+the F-MAP Excel file gets into the warehouse), `dbt_utils` (all the grain/range data tests),
+`db-dtypes` (without it BigQuery results won't convert to pandas), and `numpy` (the forecast's
+feature math and error metric).
