@@ -1,14 +1,17 @@
--- Combined model: F-MAP price joined (via category_crosswalk) to dim_nutrition, giving nutrients
--- per dollar by category x region x month, ranked by protein per dollar within each region/month.
+{{ config(materialized='table', cluster_by=['nutrient_number']) }}
+
+-- Combined model: F-MAP price joined (via category_crosswalk) to the LONG dim_nutrition, giving
+-- every nutrient per dollar by category x region x month, ranked per nutrient within each
+-- region/month. Joining the LONG nutrition dim fans each price row out to one row per nutrient.
 --
 -- Units: both sides are per 100 g, so the 100 g cancels —
---   nutrient_per_dollar = nutrient_g_per_100g / mean_unit_value   (mean_unit_value is USD per 100 g)
---                       = grams of nutrient per dollar.
+--   amount_per_dollar = amount_per_100g / mean_unit_value   (mean_unit_value is USD per 100 g)
+--                     = amount of nutrient (in its own unit: g / mg / ug / kcal) per dollar.
 --
 -- CAVEAT: uses HISTORICAL F-MAP prices (2012-2018) with static nutrition — NOT current prices.
 -- fct_bls_prices is the current/forecastable feed. Crosswalk is intentionally lossy and several
 -- priced categories share one broad FDC nutrition profile (see category_crosswalk).
--- Grain: (efpg_code, region_code, month_date).
+-- Grain: (efpg_code, region_code, month_date, nutrient_number, unit).
 
 with prices as (
 
@@ -40,12 +43,11 @@ joined as (
         prices.month_date,
         prices.mean_unit_value,
         crosswalk.fdc_food_category,
-        nutrition.protein_g_per_100g,
-        nutrition.energy_kcal_per_100g,
-        nutrition.fiber_g_per_100g,
-        safe_divide(nutrition.protein_g_per_100g,   prices.mean_unit_value) as protein_g_per_dollar,
-        safe_divide(nutrition.energy_kcal_per_100g, prices.mean_unit_value) as energy_kcal_per_dollar,
-        safe_divide(nutrition.fiber_g_per_100g,     prices.mean_unit_value) as fiber_g_per_dollar
+        nutrition.nutrient_number,
+        nutrition.nutrient_name,
+        nutrition.unit,
+        nutrition.amount_per_100g,
+        safe_divide(nutrition.amount_per_100g, prices.mean_unit_value) as amount_per_dollar
     from prices
     inner join crosswalk
         on prices.efpg_code = crosswalk.fmap_efpg_code
@@ -57,7 +59,7 @@ joined as (
 select
     *,
     rank() over (
-        partition by region_code, month_date
-        order by protein_g_per_dollar desc
-    ) as protein_rank
+        partition by region_code, month_date, nutrient_number, unit
+        order by amount_per_dollar desc
+    ) as nutrient_rank
 from joined

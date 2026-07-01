@@ -1,51 +1,75 @@
 # USDA Food Price & Nutrition Pipeline
 
-## Goal
+[![CI](https://github.com/Mikepelgar/USDA-Food-Price/actions/workflows/ci.yml/badge.svg)](https://github.com/Mikepelgar/USDA-Food-Price/actions/workflows/ci.yml)
 
-An automated data pipeline that pulls US food price and nutrition data from public
-USDA APIs and loads it into a cloud data warehouse. The warehouse data is transformed
-into analytics-ready tables that power a dashboard and a food-price forecast.
+An end-to-end, free-tier data pipeline that ingests U.S. food **price** and **nutrition** data
+from public USDA + BLS sources, lands it in a cloud warehouse, transforms it into tested
+analytics tables, orchestrates the whole flow on a schedule, and serves it through an interactive
+dashboard plus a next-month price forecast. Built as a portfolio project to demonstrate a
+realistic modern data stack — ingestion, warehousing, dbt modeling, orchestration, ML, and CI —
+running entirely on Google's BigQuery **Sandbox** (no billing, no charges).
 
-## Planned Architecture (high level)
+**Status: complete (Phases 0–6).** Ingestion → load → dbt transform → Airflow orchestration →
+Streamlit dashboard + scikit-learn forecast are all built, run, and tested.
+
+## Tech stack
+
+| Layer | Tools |
+| ----- | ----- |
+| Language | Python 3.11 (`venv`) |
+| Ingestion | `requests`, `python-dotenv` |
+| Warehouse | Google **BigQuery** (Sandbox / free tier; batch + query jobs only) |
+| Transformation | **dbt** (`dbt-bigquery`) + `dbt_utils` |
+| Orchestration | **Apache Airflow** (LocalExecutor) on **Docker Compose** |
+| Serving | **Streamlit** dashboard (+ Altair charts) |
+| Forecasting | **scikit-learn** (Ridge: AR(1) + month seasonality) |
+| CI | **GitHub Actions** (pytest + `dbt parse`) |
+| Testing | `pytest` (fully mocked) + dbt data tests |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        FDC["FoodData Central API<br/>(nutrition, JSON)"]
+        FMAP["ERS F-MAP file<br/>(historical prices, .xlsx)"]
+        BLS["BLS APU API<br/>(current prices, JSON)"]
+    end
+    subgraph Ingestion["Ingestion (Phase 1)"]
+        RAW["data/raw/*<br/>(gitignored)"]
+    end
+    subgraph Warehouse["BigQuery"]
+        URAW["usda_raw<br/>(Phase 2 loader)"]
+        USTG["usda_staging<br/>(dbt views)"]
+        UANL["usda_analytics<br/>(dbt tables)"]
+        UFCT["usda_forecast<br/>(forecast)"]
+    end
+    subgraph Serve["Serve (Phase 5)"]
+        DASH["Streamlit dashboard"]
+    end
+
+    FDC & FMAP & BLS --> RAW --> URAW
+    URAW -->|dbt| USTG -->|dbt| UANL
+    UANL --> DASH
+    UANL -->|scikit-learn| UFCT --> DASH
+
+    AIRFLOW["Airflow DAG (Phase 4, Docker):<br/>ingest → load → dbt build → dbt test, daily"]
+    AIRFLOW -.orchestrates.-> RAW
+```
+
+Plain-text view of the same flow:
 
 ```
-USDA APIs            Ingestion          Warehouse         Transform         Serve
-─────────            ─────────          ─────────         ─────────         ─────
-FoodData Central ─┐
-(nutrition)       ├─► Python scripts ─► raw tables ────► cleaned/ ───────► Dashboard
-ERS via           │   (requests)        (BigQuery)       modeled tables    + Price forecast
-api.data.gov ─────┘                                      (SQL)
-(prices)
-```
-
-1. **Ingestion** — Python scripts call the USDA FoodData Central and ERS APIs and land
-   raw responses in the cloud warehouse.
-2. **Warehouse** — Google Cloud (BigQuery) holds raw and transformed data.
-3. **Transformation** — SQL transforms raw data into clean, modeled tables.
-4. **Serving** — a dashboard visualizes trends; a forecasting model projects food prices.
-
-> Status: Phases 1–5 are built — ingestion (→ local raw files), load (raw files → BigQuery),
-> transformation (dbt models on BigQuery), orchestration (Airflow in Docker runs the whole
-> pipeline daily), and a Streamlit **dashboard + next-month price forecast** over the analytics
-> tables. Phase 6 (CI + portfolio polish) is next.
-
-## Architecture (full flow)
-
-```
-SOURCES                  INGESTION (Phase 1)        WAREHOUSE (Phase 2)     TRANSFORM (Phase 3)      SERVE (Phase 5)
-───────                  ──────────────────         ───────────────────     ───────────────────      ───────────────
-FoodData Central API ─┐  nutrition_fdc.py ─────┐                            dbt staging views        Streamlit dashboard
-(nutrition, JSON)     │                        │                            (usda_staging)           (dashboard/app.py)
-                      │                        ├─► data/raw/*  ──loader──►  raw tables       ──dbt──► analytics tables ──┐
-ERS F-MAP file        ├─ prices_fmap.py ───────┤   (gitignored)            (usda_raw)               (usda_analytics):   ├─► price trends,
-(historical .xlsx)    │                        │                                                     fct_fmap_prices,    │   inflation,
-                      │                        │                                                     fct_bls_prices,     │   nutrition/$,
-BLS APU API ──────────┘  prices_bls.py ────────┘                                                     dim_nutrition,      │   forecast view
-(current, JSON)                                                                                      fct_nutrition_per_$ ─┘
-                                                                                                            │
-                            ORCHESTRATION (Phase 4): Apache Airflow in Docker                              ▼  forecast (Phase 5)
-                            runs ingest → load → dbt build → dbt test daily.            bls_forecast.py ─► usda_forecast.fct_bls_forecast
-                                                                                        (scikit-learn, written back to BigQuery; read by the dashboard)
+SOURCES                 INGESTION (P1)     WAREHOUSE (P2)      TRANSFORM (P3)        SERVE (P5)
+───────                 ──────────────     ──────────────      ──────────────        ──────────
+FoodData Central API ─┐                                        dbt staging views     Streamlit
+(nutrition, JSON)     │  nutrition_fdc ─┐                      (usda_staging)         dashboard
+ERS F-MAP file        ├─ prices_fmap   ─┼─► data/raw/* ─load─► usda_raw ──dbt──► usda_analytics ─┬─► trends,
+(historical .xlsx)    │                 │   (gitignored)        (raw tables)   (fct/dim tables)  │   inflation,
+BLS APU API ──────────┘  prices_bls    ─┘                                                        │   nutrition/$,
+(current, JSON)                                                                                  │   forecast
+                                                                            bls_forecast.py ──►  │
+        ORCHESTRATION (P4): Airflow in Docker runs ingest→load→dbt build→dbt test daily.    usda_forecast ┘
 ```
 
 - **Sources → Ingestion.** Three Python scripts pull from the USDA FoodData Central API
@@ -54,23 +78,61 @@ BLS APU API ──────────┘  prices_bls.py ──────�
 - **Warehouse.** A loader batch-loads those raw files as-is into `usda_raw` tables in BigQuery.
 - **Transform.** dbt turns the raw tables into typed, tested staging views (`usda_staging`) and
   analytics tables (`usda_analytics`).
-- **Orchestrate.** One Airflow DAG (in Docker) runs ingest → load → `dbt build`/`dbt test` daily.
+- **Orchestrate.** One Airflow DAG (in Docker) runs ingest → load → `dbt build` → `dbt test` daily.
 - **Serve.** A Streamlit dashboard reads the analytics tables; a forecast script predicts next
   month's BLS price per item and writes it back to `usda_forecast` for the dashboard to display.
 
+## Results
+
+> Some metrics depend on your own run — clearly-labeled placeholders are left to fill in.
+> The dbt test count, nutrient count, and forecast accuracy below come from real runs in this repo.
+
+| Metric | Value |
+| ------ | ----- |
+| Total records processed (raw) | _(fill in — sum of `raw_nutrition` + `raw_prices_bls` + `raw_prices_fmap` row counts; the loader prints these)_ |
+| Food categories × regions (F-MAP) | _(fill in — F-MAP covers **90** food categories × **15** geographic areas)_ |
+| Nutrients surfaced (nutrition-per-dollar) | **214** distinct nutrient×unit series (of ~221 reported in the raw nutrition data) |
+| dbt data-quality tests | **47** (all passing) |
+| Pipeline run time (Airflow DAG) | _(fill in from a real DAG run)_ |
+| Pipeline success rate | _(fill in — e.g. N / N successful daily runs)_ |
+| Forecast accuracy (MAPE, held-out backtest) | _(confirm)_ ≈ **2.8%** vs. naive baseline ≈ **2.1%** |
+
+## Data caveats (read these)
+
+This project is honest about what the data can and cannot say:
+
+- **F-MAP prices are historical (2012–2018).** The ERS Food-at-Home Monthly Area Prices dataset
+  is a static file download; it is *not* a live feed and does not cover recent years.
+- **BLS prices are current but national.** The BLS Average Price (APU) series are U.S.
+  city-average only — there is **no regional breakdown**. (F-MAP has regions; BLS does not.)
+- **BLS is not USDA.** The current/forecastable price feed comes from the Bureau of Labor
+  Statistics, a separate agency. USDA supplies nutrition (FoodData Central) and the historical
+  F-MAP prices.
+- **The nutrition↔price crosswalk is intentionally lossy.** FDC food categories are broad (e.g.
+  *dairy and egg products*) while F-MAP price categories are granular (e.g. *whole milk*), so the
+  nutrition-per-dollar join maps them through a small, curated crosswalk; several priced
+  categories share one broad nutrition profile, and unmapped categories are left out. More
+  nutrients enrich the menu but do **not** make the join more precise.
+- **Forecast is small-data.** Each BLS series has only ~48 monthly points, so the forecast is a
+  deliberately simple near-random-walk model; accuracy close to a naive baseline is expected.
+
 ## Setup
 
-```bash
+```powershell
 # Create and activate the virtual environment (Windows PowerShell)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# Install ingestion-phase dependencies
+# Install dependencies
 pip install -r requirements.txt
 
 # Configure secrets
 copy .env.example .env   # then fill in your keys
 ```
+
+`.env` holds your API keys and the path to a Google service-account JSON
+(`GOOGLE_APPLICATION_CREDENTIALS`); both `.env` and `secrets/` are gitignored. See `.env.example`
+for the full list of variables.
 
 ## Phase 1 — Ingestion (raw local files)
 
@@ -126,16 +188,16 @@ with no duplicates. The loader then prints row counts per table to verify.
 
 **One-time Google Cloud setup (beginner, minimal):**
 
-1. **Service-account JSON** — already at `secrets/gcp-service-account.json`
-   (gitignored). `.env` points to it: `GOOGLE_APPLICATION_CREDENTIALS=./secrets/gcp-service-account.json`.
-2. **Dataset** — you don't create it by hand; the loader creates dataset `usda_raw`
-   in project `usda-food-prices` (US) on first run if it's missing. (To make it
-   manually instead: `bq --location=US mk -d usda-food-prices:usda_raw`.)
-3. **Free tier / billing** — confirm in the Cloud Console under *Billing*:
-   - **BigQuery Sandbox** (no billing account linked) = you *cannot* be charged;
-     tables get a 60-day expiry. This is the safest posture for this project.
-   - With a billing account linked, you're on the **free tier** (10 GB storage +
-     1 TB queries/month); batch loads cost nothing. Set a budget alert to be safe.
+1. **Service-account JSON** — placed at `secrets/gcp-service-account.json` (gitignored).
+   `.env` points to it: `GOOGLE_APPLICATION_CREDENTIALS=./secrets/gcp-service-account.json`.
+2. **Dataset** — created automatically; the loader creates dataset `usda_raw` in project
+   `usda-food-prices` (US) on first run if it's missing. (Manual alternative:
+   `bq --location=US mk -d usda-food-prices:usda_raw`.)
+3. **Free tier / billing** — in the Cloud Console under *Billing*:
+   - **BigQuery Sandbox** (no billing account linked) = you *cannot* be charged; tables get a
+     60-day expiry. This is the safest posture for this project.
+   - With a billing account linked, you're on the **free tier** (10 GB storage + 1 TB
+     queries/month); batch loads cost nothing. Set a budget alert to be safe.
 
 ```powershell
 $env:PYTHONPATH = "src"     # bash: export PYTHONPATH=src
@@ -159,11 +221,14 @@ tables into clean, tested, documented analytics tables on BigQuery: **4 staging 
 | --------------- | ----- | ---------- |
 | `fct_fmap_prices` | category × region × month | ERS F-MAP monthly mean-unit-value price (USD/100 g) + price index, 2012–2018 |
 | `fct_bls_prices` | item × month | BLS current monthly retail price series — the forecast input for Phase 5 |
-| `dim_nutrition` | FDC food category | median nutrients per 100 g (non-Branded foods) |
-| `fct_nutrition_per_dollar` | category × region × month | nutrients **per dollar**, ranked by protein/$ — F-MAP price ⋈ nutrition via a category crosswalk |
+| `dim_nutrition` | food category × **nutrient** | **LONG**: median amount per 100 g for **every** reported nutrient (non-Branded foods), carrying `nutrient_number`, `nutrient_name`, `unit` |
+| `fct_nutrition_per_dollar` | category × region × month × **nutrient** | **every** nutrient **per dollar** (`amount_per_100g / mean_unit_value`), ranked per nutrient — F-MAP price ⋈ nutrition via a category crosswalk |
 
-Two seeds support these: `category_crosswalk.csv` (F-MAP category → FDC food category — see the
-note below) and `bls_series_items.csv` (BLS series id → item label).
+`dim_nutrition` and `fct_nutrition_per_dollar` are **LONG** (one row per nutrient), so all ~214
+nutrient series — macros, fats, every mineral and vitamin — are reachable, each carrying its own
+`unit` (G / MG / UG / KCAL) so "per dollar" is labelled correctly. Two seeds support these:
+`category_crosswalk.csv` (F-MAP category → FDC food category — see the note below) and
+`bls_series_items.csv` (BLS series id → item label).
 
 ### How dbt connects to BigQuery (beginner notes)
 
@@ -174,8 +239,8 @@ note below) and `bls_series_items.csv` (BLS series id → item label).
 - **The connection** uses BigQuery `method: service-account` with `keyfile:` pointing at the
   **same** `secrets/gcp-service-account.json` the Phase-2 loader uses. dbt mints a token from
   that key and runs query jobs in project `usda-food-prices` (free tier / Sandbox; no streaming).
-- **Secrets stay out of git.** The keyfile is already gitignored, and `profiles.yml` only stores
-  a *path* to it (never the key). The committed template is
+- **Secrets stay out of git.** The keyfile is gitignored, and `profiles.yml` only stores a *path*
+  to it (never the key). The committed template is
   [`transform/profiles.example.yml`](transform/profiles.example.yml); your real `profiles.yml` is
   gitignored. Easiest setup: copy it to `transform/profiles.yml` and run dbt **from** `transform/`
   with `--profiles-dir .` (so the relative `keyfile` path resolves). Alternatively keep it at
@@ -185,7 +250,7 @@ note below) and `bls_series_items.csv` (BLS series id → item label).
 
 ```powershell
 # from the repo root, in the activated .venv:
-pip install -r requirements.txt          # now includes dbt-bigquery
+pip install -r requirements.txt          # includes dbt-bigquery
 
 cd transform
 copy profiles.example.yml profiles.yml   # then confirm the keyfile path is correct
@@ -198,12 +263,10 @@ dbt build --profiles-dir .
 dbt test  --profiles-dir .
 ```
 
-`dbt build` already runs seeds, models, and tests together in dependency order — you do **not**
-need to run `dbt seed` / `dbt run` / `dbt test` separately (each exists if you want a single
-stage). Tests cover not-null/unique keys, prices never negative, plausible nutrient ranges, and a
-uniqueness check on the F-MAP category-month-region grain.
-
-Browse the generated docs (model + column descriptions and the lineage graph):
+`dbt build` runs seeds, models, and tests together in dependency order. Tests cover not-null /
+unique keys, prices and per-dollar amounts never negative, and uniqueness on each table's grain
+(the F-MAP price grain and the per-nutrient nutrition-per-dollar grain). Browse the generated docs
+(model + column descriptions and the lineage graph):
 
 ```powershell
 dbt docs generate --profiles-dir .
@@ -236,8 +299,12 @@ pipeline — ingest → load → dbt — on a daily schedule with retries, all l
 The stack is four containers: **postgres** (Airflow's metadata DB), a one-shot **airflow-init**
 (migrates the DB + creates the admin user), the **scheduler**, and the **webserver**. They all
 share one custom image ([`docker/airflow/Dockerfile`](docker/airflow/Dockerfile)) that adds the
-ingestion/loader libraries to Airflow and bakes the dbt project in (with `dbt deps` run at build
-time, in an isolated venv so dbt's dependencies don't clash with Airflow's).
+ingestion/loader libraries to Airflow and **bakes the dbt project in** (with `dbt deps` run at
+build time, in an isolated venv so dbt's dependencies don't clash with Airflow's).
+
+> **Editing dbt models needs a rebuild.** Because the dbt project is baked into the image, after
+> changing anything under `transform/` you must re-run `docker compose up -d --build` for the DAG
+> to pick up the new models.
 
 ### Secrets (never in the DAG)
 
@@ -258,7 +325,7 @@ docker compose up -d --build
 # 3. Open the UI and log in (credentials from .env: _AIRFLOW_WWW_USER_USERNAME / _PASSWORD):
 #    http://localhost:8080
 
-# 4. Trigger a run manually — either un-pause the DAG and click ▶ (Trigger) in the UI, or:
+# 4. Trigger a run manually — un-pause the DAG and click ▶ in the UI, or:
 docker compose exec airflow-scheduler airflow dags trigger usda_food_price_pipeline
 
 # 5. Stop the stack when done (add -v to also delete the Airflow metadata DB volume):
@@ -269,19 +336,7 @@ docker compose down
 **green** = success, **red** = failed, **pink** = skipped. `ingest_fmap` shows **skipped** on
 re-runs (the 2012–2018 file is static — it only downloads once). If a dbt test fails, `dbt_test`
 goes **red** and the whole run is marked failed, so the pipeline stops rather than reporting
-success. Click any task → **Logs** to see exactly what it printed.
-
-### Two behaviors worth knowing
-
-- **One fresh snapshot per run.** `ingest_nutrition` and `ingest_bls` write a *new* timestamped
-  file every run, and the loader globs *all* of a source's files with `WRITE_TRUNCATE`. So those
-  two tasks **clear their `data/raw/<source>` folder before re-ingesting** — each run loads
-  exactly one fresh snapshot instead of piling up duplicates (and `data/` doesn't grow
-  unbounded). _Phase-6 follow-up: a loader `--latest-only` flag would do this more cleanly inside
-  the loader; for now it's handled in the DAG wrapper so Phase-1/2 code stays untouched._
-- **Editing dbt models needs a rebuild.** The dbt project is baked into the image (so packages
-  install once, at build). After changing anything under `transform/`, re-run
-  `docker compose up -d --build` to pick it up.
+success.
 
 ## Phase 5 — Dashboard + forecast (Streamlit + scikit-learn)
 
@@ -292,7 +347,7 @@ orchestration. BigQuery reads in the dashboard are cached (`st.cache_data`, 1-ho
 widget interactions filter in-memory frames instead of re-scanning BigQuery.
 
 ```powershell
-pip install -r requirements.txt   # now includes streamlit, pandas, db-dtypes, scikit-learn
+pip install -r requirements.txt   # includes streamlit, pandas, db-dtypes, scikit-learn
 
 # 1. Forecast next month's BLS price per item and write it back to BigQuery (idempotent).
 #    Reads usda_analytics.fct_bls_prices; writes usda_forecast.fct_bls_forecast (WRITE_TRUNCATE).
@@ -310,7 +365,7 @@ streamlit run dashboard/app.py     # opens http://localhost:8501
 | ---- | ------ | ----- |
 | 📈 F-MAP price trends | `fct_fmap_prices` | price (USD/100 g) over time by category × region — **historical 2012–2018** |
 | 📊 BLS inflation | `fct_bls_prices` | **current** monthly retail prices + month-over-month inflation (U.S. city average, no region) |
-| 🥗 Nutrition per dollar | `fct_nutrition_per_dollar` | most protein / energy / fiber per dollar (historical F-MAP price × FDC nutrition) |
+| 🥗 Nutrition per dollar | `fct_nutrition_per_dollar` | pick any of ~214 nutrients; amount per dollar by category, historical F-MAP price × FDC nutrition |
 | 🔮 Forecast | `fct_bls_forecast` + `fct_bls_prices` | next-month forecast vs. actuals, with the held-out accuracy metric |
 
 **The forecast model.** Each BLS series has only ~4 years of monthly history (~48 points), so the
@@ -321,12 +376,23 @@ next to a last-value naive baseline. On this small, near-random-walk data the ov
 few percent and close to naive — expected for a small-data portfolio forecast. The script writes
 one row per item to `usda_forecast.fct_bls_forecast` via a batch load (no streaming — Sandbox-safe).
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request,
+credential-free:
+
+- **`python-tests`** — installs dependencies and runs the fully-mocked `pytest` suite (no network,
+  no cloud credentials).
+- **`dbt-validate`** — `dbt deps` + `dbt parse` against a committed dummy profile
+  ([`.github/dbt/profiles.yml`](.github/dbt/profiles.yml)); `dbt parse` validates the project's
+  models, tests, and lineage **without** opening a warehouse connection.
+
 ## Repository Layout
 
 | Path                              | Purpose                                              |
 | --------------------------------- | ---------------------------------------------------- |
 | `src/usda_food_price_pipeline/`   | Python package (importable source code)              |
-| `src/.../ingestion/`              | Ingestion scripts that pull from the USDA APIs       |
+| `src/.../ingestion/`              | Ingestion scripts that pull from the USDA/BLS sources |
 | `src/.../load/`                   | Phase-2 loader: raw files → BigQuery raw tables       |
 | `src/.../forecast/`               | Phase-5 forecast: BLS next-month price → BigQuery     |
 | `transform/`                      | Phase-3 dbt project: staging + analytics models, seeds, tests |
@@ -334,9 +400,15 @@ one row per item to `usda_forecast.fct_bls_forecast` via a batch load (no stream
 | `dags/`                           | Phase-4 Airflow DAG (`usda_food_price_pipeline`)     |
 | `docker/airflow/`                 | Phase-4 Airflow image + container-only dbt profile   |
 | `docker-compose.yml`              | Phase-4 local Airflow stack (LocalExecutor)          |
+| `.github/`                        | CI workflow + dummy dbt profile for credential-free validation |
 | `config/`                         | Non-secret configuration files                       |
 | `tests/`                          | Automated tests (pytest)                             |
 | `secrets/`                        | Local-only credentials (gitignored)                  |
 | `.env.example` / `.env`           | Environment-variable template / your real values     |
-| `requirements.txt`                | Python dependencies (ingestion/load/dbt)             |
+| `requirements.txt`                | Python dependencies (ingestion/load/dbt/serve)       |
 | `requirements-airflow.txt`        | Extra libs baked into the Airflow image              |
+
+## License
+
+See [`LICENSE`](LICENSE). _(Add a license file before publishing — MIT is a common choice for
+portfolio projects.)_
