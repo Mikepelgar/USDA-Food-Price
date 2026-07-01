@@ -8,7 +8,8 @@ An automated, free-tier data pipeline that pulls US food **price** (USDA ERS F-M
 **nutrition** (USDA FoodData Central) data from public APIs/files, loads it into a cloud data
 warehouse (BigQuery), transforms it into analytics-ready tables (dbt), orchestrates the flow
 (Airflow), and serves a **dashboard** + a **food-price forecast**. **Status: complete — all phases
-(0–6) are built, run, tested, and merged to `main`.**
+(0–6) are built, run, tested, and merged to `main`.** For a narrative walkthrough of the sources,
+every process, the goal, and the results, see [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md).
 
 ## Architecture & tech stack
 
@@ -115,7 +116,7 @@ against the committed dummy profile `.github/dbt/profiles.yml`, no warehouse con
 ## Current state
 
 **All phases (0–6) are COMPLETE and merged to `main`** (Phase 3 PR #3, Phase 4 PR #4, Phase 5 PR #5;
-Phase 6 via a `phase-6` PR). BigQuery holds: `usda_raw` (raw), `usda_staging`/`usda_analytics` (dbt
+Phase 6 PR #6, squash-merged 2026-07-01). BigQuery holds: `usda_raw` (raw), `usda_staging`/`usda_analytics` (dbt
 models), `usda_forecast` (forecast). Phase 6 added: the **all-nutrients** nutrition-per-dollar feature
 (LONG `dim_nutrition`; per-nutrient `fct_nutrition_per_dollar`, new grains, ~214 nutrients, dbt tests
 47/47 PASS, dashboard nutrient dropdown — validated headless against live BigQuery), **GitHub Actions CI**,
