@@ -117,7 +117,7 @@ def load_nutrition_menu() -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Loading nutrition-per-dollar…")
 def load_nutrition_per_dollar(nutrient_number: str, unit: str) -> pd.DataFrame:
-    """One nutrient's slice (all regions × months) — the per-dollar table is now LONG over ~221
+    """One nutrient's slice (all regions × months) — the per-dollar table is now LONG over 214
     nutrients, so we read just the selected nutrient. Cached per (nutrient_number, unit)."""
     project = get_client().project
     df = _query_df(
@@ -365,7 +365,7 @@ with tab_npd:
     st.subheader("Most nutrition per dollar")
     st.caption(
         "**Source:** F-MAP price (**historical**) joined to FoodData Central nutrition (static) "
-        "via a category crosswalk. Pick any of the ~221 reported nutrients; bars show the amount "
+        "via a category crosswalk. Pick any of the 214 nutrients; bars show the amount "
         "**per dollar** in that nutrient's own unit. Note: the crosswalk is intentionally lossy, "
         "so several priced categories share one broad nutrition profile."
     )
@@ -441,10 +441,10 @@ with tab_fcst:
     st.subheader("Next-month price forecast (BLS)")
     st.caption(
         "**Source:** forecast written by `usda_food_price_pipeline.forecast.bls_forecast` to "
-        f"`{FORECAST_DATASET}.{FORECAST_TABLE}`. Model: per-series linear trend + month "
+        f"`{FORECAST_DATASET}.{FORECAST_TABLE}`. Model: per-series AR(1) + month "
         "seasonality (scikit-learn Ridge). **Accuracy** = MAPE of an expanding one-step-ahead "
         "backtest over the most recent held-out months; a last-value naive baseline is shown "
-        "for context. Small data (~48 monthly points/series) → expect noisy accuracy."
+        "for context. Small data (only the last ~3–4 years of monthly prices per series) → expect noisy accuracy."
     )
 
     if forecast.empty:

@@ -66,8 +66,8 @@ models:
     description: >
       Nutrition profile per FDC food_category in LONG form: one row per
       (food_category, nutrient_number, unit), the MEDIAN amount per 100 g across non-Branded foods
-      (Foundation / SR Legacy / Survey). All ~221 reported nutrients are surfaced (not just a curated
-      few). "unit" is part of the key, so energy appears as both KCAL and kJ. Feeds
+      (Foundation / SR Legacy / Survey). Every nutrient these foods report is surfaced (216 in the current
+      snapshot), not just a curated few. "unit" is part of the key, so energy appears as both KCAL and kJ. Feeds
       fct_nutrition_per_dollar. NOTE: per-nutrient max bounds were intentionally dropped — a single
       ceiling can't span g / mg / µg / kcal — so only a >= 0 sanity check remains.
     columns:

@@ -16,4 +16,4 @@ dbt-bigquery>=1.7,<2.0  # dbt adapter for BigQuery (pulls in dbt-core); runs the
 streamlit              # interactive dashboard over the usda_analytics tables (bundles altair for charts)
 pandas                 # dataframes for the dashboard + forecast
 db-dtypes              # lets BigQuery query results convert to pandas (DATE/NUMERIC dtypes)
-scikit-learn           # next-month BLS price forecast (Ridge: linear trend + month seasonality)
+scikit-learn           # next-month BLS price forecast (Ridge: AR(1) + month seasonality)

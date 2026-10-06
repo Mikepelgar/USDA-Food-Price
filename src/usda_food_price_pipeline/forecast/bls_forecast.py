@@ -5,8 +5,8 @@ monthly BLS Average-Price feed — the only forecastable source; F-MAP ends in 2
 fits a simple per-series model, and writes one next-month forecast per series to
 ``usda_forecast.fct_bls_forecast``.
 
-Why this is a *simple* model: each BLS series has only ~4 years of monthly history
-(~48 points), so a small, interpretable model is appropriate and held-out accuracy
+Why this is a *simple* model: each BLS series has only ~3–4 years of monthly history
+(the current year plus the 3 before it; 42–43 points in the 2026-10 run), so a small, interpretable model is appropriate and held-out accuracy
 is inherently noisy. Retail food prices behave close to a random walk, so the model
 is a one-step **AR(1) + seasonality**: predict next month from last month's price
 plus the sine/cosine of the month-of-year, via a scikit-learn ``StandardScaler`` →

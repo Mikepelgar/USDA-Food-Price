@@ -84,18 +84,18 @@ BLS APU API ──────────┘  prices_bls    ─┘             
 
 ## Results
 
-> Some metrics depend on your own run — clearly-labeled placeholders are left to fill in.
-> The dbt test count, nutrient count, and forecast accuracy below come from real runs in this repo.
+> All figures below come from real runs in this repo (warehouse rebuild + Airflow run, 2026-10-05/06).
+> Run-dependent figures (forecast accuracy, run time) will change as the data refreshes.
 
 | Metric | Value |
 | ------ | ----- |
-| Total records processed (raw) | _(fill in — sum of `raw_nutrition` + `raw_prices_bls` + `raw_prices_fmap` row counts; the loader prints these)_ |
-| Food categories × regions (F-MAP) | _(fill in — F-MAP covers **90** food categories × **15** geographic areas)_ |
+| Total records processed (raw) | **164,113** (1,500 nutrition foods + 351 BLS observations + 162,262 F-MAP worksheet rows) |
+| Food categories × regions (F-MAP) | **90** food categories × **15** geographic areas (national, 4 Census regions, 10 metro areas) |
 | Nutrients surfaced (nutrition-per-dollar) | **214** distinct nutrient×unit series (of ~221 reported in the raw nutrition data) |
 | dbt data-quality tests | **47** (all passing) |
-| Pipeline run time (Airflow DAG) | _(fill in from a real DAG run)_ |
-| Pipeline success rate | _(fill in — e.g. N / N successful daily runs)_ |
-| Forecast accuracy (MAPE, held-out backtest) | _(confirm)_ ≈ **2.8%** vs. naive baseline ≈ **2.1%** |
+| Pipeline run time (Airflow DAG) | **~3.5 min** end-to-end (ingest → load → dbt run → dbt test; scheduled run, 2026-10-06) |
+| Pipeline success rate | **3 of 4** runs succeeded; the 1 failure was a run deliberately stopped because it was on an outdated image, not a pipeline error |
+| Forecast accuracy (MAPE, held-out backtest) | **1.79%** vs. naive baseline **1.51%** — the model is slightly *worse* than naive overall (better on 1 of 8 series) |
 
 ## Data caveats (read these)
 
@@ -113,7 +113,7 @@ This project is honest about what the data can and cannot say:
   nutrition-per-dollar join maps them through a small, curated crosswalk; several priced
   categories share one broad nutrition profile, and unmapped categories are left out. More
   nutrients enrich the menu but do **not** make the join more precise.
-- **Forecast is small-data.** Each BLS series has only ~48 monthly points, so the forecast is a
+- **Forecast is small-data.** Each BLS series has only ~3–4 years of monthly points (42–43 in the latest run), so the forecast is a
   deliberately simple near-random-walk model; accuracy close to a naive baseline is expected.
 
 ## Setup
@@ -368,12 +368,12 @@ streamlit run dashboard/app.py     # opens http://localhost:8501
 | 🥗 Nutrition per dollar | `fct_nutrition_per_dollar` | pick any of ~214 nutrients; amount per dollar by category, historical F-MAP price × FDC nutrition |
 | 🔮 Forecast | `fct_bls_forecast` + `fct_bls_prices` | next-month forecast vs. actuals, with the held-out accuracy metric |
 
-**The forecast model.** Each BLS series has only ~4 years of monthly history (~48 points), so the
+**The forecast model.** Each BLS series has only ~3–4 years of monthly history (42–43 points in the latest run), so the
 model is deliberately simple: a per-series **AR(1) + month-seasonality** regression (last month's
 price + sin/cos of the month, via scikit-learn `StandardScaler` → `Ridge`). Accuracy is the
 **MAPE of an expanding one-step-ahead backtest** over the most recent held-out months, reported
 next to a last-value naive baseline. On this small, near-random-walk data the overall MAPE is a
-few percent and close to naive — expected for a small-data portfolio forecast. The script writes
+few percent and close to (currently slightly worse than) naive — expected for a small-data portfolio forecast. The script writes
 one row per item to `usda_forecast.fct_bls_forecast` via a batch load (no streaming — Sandbox-safe).
 
 ## Continuous integration
