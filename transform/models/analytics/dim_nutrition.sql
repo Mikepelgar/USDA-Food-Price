@@ -3,9 +3,8 @@
 -- per nutrient, then takes the MEDIAN across the foods in each category (median resists outliers /
 -- mislabeled foods). Branded + Experimental foods are excluded (noisy grocery-aisle categories).
 --
--- "unit" is part of the key on purpose: energy shows up as two nutrients (KCAL and kJ), which is why
--- the old WIDE model had to hard-code `and unit_name = 'KCAL'`. Units (G / MG / UG / KCAL / …) flow
--- through verbatim so downstream "per dollar" can be labelled correctly.
+-- "unit" is carried in the key so downstream "per dollar" values can be labelled correctly
+-- (G / MG / UG / KCAL / …). Energy appears as separate nutrients (208 = KCAL, 268 = kJ).
 -- Grain: (food_category, nutrient_number, unit).
 
 with foods as (
