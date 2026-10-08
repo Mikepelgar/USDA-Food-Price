@@ -10,11 +10,11 @@ up, and the dashboard runs on localhost.
 
 ## Sources
 
-- **USDA FoodData Central API:** nutrient profiles from searches for 15 common foods.
-- **USDA ERS Food-at-Home Monthly Area Prices (F-MAP):** monthly prices for 90 food categories in
-  15 U.S. areas, 2012 to 2018. An Excel download, not an API, and it ends in 2018.
-- **BLS Average Price data:** current monthly prices for 8 items, from eggs to chicken breast.
-  National average only. BLS is not part of USDA.
+- USDA FoodData Central API: nutrient profiles from searches for 15 common foods.
+- USDA ERS Food-at-Home Monthly Area Prices (F-MAP): monthly prices for 90 food categories in 15
+  U.S. areas, 2012 to 2018. An Excel download, not an API, and it ends in 2018.
+- BLS Average Price data: current monthly prices for 8 items, from eggs to chicken breast. National
+  average only. BLS is not part of USDA.
 
 ## How it works
 
@@ -31,53 +31,55 @@ Airflow, daily:
 ingest_nutrition > ingest_bls > ingest_fmap > load_bigquery > dbt_run > dbt_test
 ```
 
-The loader copies raw records into BigQuery with almost no reshaping, using `WRITE_TRUNCATE` so a
-rerun replaces rows instead of duplicating them. All cleaning happens in dbt. `dbt_test` is the
-last task, so a failed data test fails the run.
+Raw records load with `WRITE_TRUNCATE`, so a rerun replaces rows instead of duplicating them. All
+cleaning happens in dbt, and `dbt_test` is the last task, so a failed data test fails the run.
 
-Price and nutrition data don't share keys: F-MAP has "whole milk", FoodData Central has "dairy and
+## How nutrition per dollar is calculated
+
+For each food category, `dim_nutrition` takes the median amount of every nutrient per 100 g across
+the category's Foundation, SR Legacy and Survey foods. Branded foods are left out. F-MAP gives each
+price category a weighted mean price in dollars per 100 g, so dividing one by the other cancels
+the 100 g:
+
+```
+amount_per_dollar = amount_per_100g / mean_unit_value
+```
+
+The result is in the nutrient's own unit per dollar, such as grams of protein or milligrams of
+calcium. `fct_nutrition_per_dollar` ranks categories by it within each area, month and nutrient.
+
+## Common problems and how they're solved
+
+**Price and nutrition don't share keys.** F-MAP has "whole milk" and FoodData Central has "dairy and
 egg products". [`category_crosswalk.csv`](transform/seeds/category_crosswalk.csv) maps 20 F-MAP
-categories onto FoodData Central categories by hand, so several price categories share one
-nutrition profile and categories without a reasonable match are left out.
+categories onto 14 FoodData Central categories by hand. Pairs like the two milks share one
+nutrition profile, so their ranking differs only by price, and categories without a reasonable
+match are left out.
 
-## Design notes
+**Eight nutrients wasn't enough.** The first `dim_nutrition` had one column per nutrient for eight
+hand-picked ones, and the raw data has 221 nutrient series. The table is now long, one row per
+category, nutrient number and unit, and 214 series reach the per-dollar table. That table has about
+3.2 million rows, so it's clustered on `nutrient_number` and the dashboard queries one nutrient at
+a time ([`dim_nutrition.sql`](transform/models/analytics/dim_nutrition.sql)).
 
-### Nutrition is stored long, not wide
+**Foods report the same nutrient more than once.** FoodData Central can list a nutrient several
+times for one food, so each food is collapsed to one value with `max()` before the median.
 
-The first version of `dim_nutrition` had one row per food category and one column per nutrient,
-for eight hand-picked nutrients: protein, energy, fat, carbs, fiber, calcium, iron and sodium. The
-dashboard offered three of them. The raw data has 221 nutrient series, and adding any of the
-others meant adding a column.
+**Stray values in the BLS feed.** Blanks and footnote markers are cast with `safe_cast`, so they
+become NULL and are dropped instead of failing the run. The annual average (period `M13`) is
+filtered out to keep one row per month
+([`stg_prices_bls.sql`](transform/models/staging/stg_prices_bls.sql)).
 
-The current version is long: one row per food category, nutrient number and unit, with the unit
-carried through so the dashboard can label each value. 214 series now reach the per-dollar table.
-The trade-off is size: `fct_nutrition_per_dollar` has about 3.2 million rows, one per category,
-area, month and nutrient. Since the dashboard reads one nutrient at a time, the table is clustered
-on `nutrient_number` and the dashboard queries one nutrient's slice from a dropdown.
+**The F-MAP file never changes.** Its task exits with code 99 when the file is already there, which
+Airflow treats as a skip. `load_bigquery` uses `trigger_rule=none_failed`, so the skip doesn't stop
+the load ([`usda_pipeline_dag.py`](dags/usda_pipeline_dag.py)).
 
-### The Airflow image keeps its own copy of the models
-
-One image runs the Airflow scheduler, webserver and init container. The ingestion libraries are
-installed into Airflow's Python against Airflow's constraints file. dbt is not: it lives in a
-separate venv at `/opt/dbt-venv` so its pins can't clash with Airflow's, and the DAG calls it by
-full path. The dbt project and `dbt_utils` are copied in at build time, so a run never downloads
-packages.
-
-The downside is that editing `transform/` has no effect on the DAG until the image is rebuilt with
-`docker compose up -d --build`. The one failure in the DAG's four runs was a run stopped because it
-was using an outdated image.
-
-### The forecast does not beat a naive baseline
-
-Each BLS series has 42 or 43 monthly points, because ingestion pulls the current year plus the
-three before it. The model is a per-series Ridge regression on last month's price plus the sine
-and cosine of the month. It is scored with an expanding one-step backtest over the last six
-months, and the same loop scores a naive forecast that repeats last month's price.
-
-The naive forecast is more accurate: 1.51% MAPE against 1.79% for the model, which is better on
-only 1 of the 8 series. Retail food prices move close to a random walk from month to month, and
-with this little history the last value is hard to beat. The dashboard shows both numbers next
-to each forecast.
+**dbt and Airflow in one image.** The ingestion libraries are installed into Airflow's Python against
+its constraints file. dbt goes into a separate venv at `/opt/dbt-venv` so its pins can't clash with
+Airflow's, and the dbt project is copied in at build time
+([`Dockerfile`](docker/airflow/Dockerfile)). The downside is that editing `transform/` has no effect
+until the image is rebuilt. The one failure in the DAG's four runs was a run stopped because it was
+using an outdated image.
 
 ## Results
 
@@ -89,16 +91,13 @@ From a full rebuild and Airflow run on 2026-10-05 and 2026-10-06:
 | dbt tests | 47, all passing |
 | Python unit tests | 41, with HTTP and BigQuery mocked |
 | Airflow run time | About 3.5 minutes |
+| Forecast MAPE | 1.79%, against 1.51% for a naive baseline |
 
-## Known limitations
-
-- The forecast is not a DAG task. It runs by hand, so `usda_forecast` is only as fresh as the
-  last manual run. It belongs at the end of the DAG, after `dbt_test`.
-- The loader reads every file in a source's raw folder, so the nutrition and BLS tasks `rm -f`
-  the previous snapshot first, or each daily run would load another copy. A `--latest-only` flag
-  on the loader would move that logic out of the DAG.
-- The forecast pairs each price with the previous row, not the previous calendar month, so a gap
-  in a series is treated as a single step.
+The forecast is a per-series Ridge regression on last month's price plus the sine and cosine of
+the month, scored with an expanding one-step backtest over the last six months of each 42 or
+43-point series. The naive forecast, which repeats last month's price, is more accurate, and the
+model wins on only 1 of the 8 series. Month to month, retail food prices move close to a random
+walk, so with this little history the last value is hard to beat.
 
 ## Running it
 
